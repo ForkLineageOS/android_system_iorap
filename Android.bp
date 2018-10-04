@@ -24,3 +24,104 @@ filegroup {
         "binder/com/google/android/startop/iorap/ITaskListener.aidl",
     ],
 }
+
+cc_defaults {
+    name: "iorap-default-flags",
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+        "-Wno-missing-field-initializers",
+        "-Wno-unused-parameter",
+        "-Wno-unused-variable",
+    ],
+
+    local_include_dirs: [
+        "include",
+        "src",
+    ],
+    // TODO: shouldn't need this but there's a soong/cmake generator bug.
+    export_include_dirs: [
+        "include",
+        "src",
+    ],
+
+    clang: true,
+    shared_libs: ["libbase"],
+    cpp_std: "c++17",
+}
+
+cc_defaults {
+    name: "iorap-default-dependencies",
+
+    static_libs: [
+        "libiorap-binder",
+    ],
+    shared_libs: [
+        "libiorap",
+        "libbinder",
+        "libutils",
+        "libcutils", // tracing.
+
+        // TODO: remove these annoying dependencies by hiding them in the main library code.
+    ],
+}
+
+cc_library_shared {
+    name: "libiorap",
+    defaults: [
+        "iorap-default-flags",
+    ],
+    srcs: [
+    ],
+
+    //export_include_dirs: ["include"],
+    //local_include_dirs: ["src/native"],
+
+    static_libs: [
+        "libprotobuf-cpp-lite",
+    ],
+}
+
+cc_library_static {
+    name: "libiorap-binder",
+    defaults: ["iorap-default-flags"],
+
+    srcs: [
+        ":iorap-aidl",
+        "src/binder/iiorap_impl.cc",
+    ],
+    shared_libs: [
+        "libbinder",
+        "libutils",
+        "libcutils", // tracing.
+    ],
+    aidl: {
+        local_include_dirs: ["binder"],
+        include_dirs: ["frameworks/native/aidl/binder"],
+        export_aidl_headers: true,
+    },
+}
+
+cc_binary {
+    name: "iorapd",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+    ],
+    srcs: [
+        "src/iorapd/main.cc",
+    ],
+}
+
+cc_test {
+    name: "iorapd-tests",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+    ],
+    srcs: [
+        "tests/src/**/*.cc",
+    ],
+}
