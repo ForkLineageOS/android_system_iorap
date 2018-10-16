@@ -120,6 +120,7 @@ cc_binary {
 
 cc_test {
     name: "iorapd-tests",
+    test_suites: ["device-tests"],
     defaults: [
         "iorap-default-flags",
         "iorap-default-dependencies",
