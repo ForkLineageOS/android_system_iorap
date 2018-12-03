@@ -49,7 +49,6 @@ cc_defaults {
 
     clang: true,
     shared_libs: ["libbase"],
-    cpp_std: "c++17",
 }
 
 cc_defaults {
