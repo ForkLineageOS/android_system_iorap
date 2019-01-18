@@ -63,11 +63,8 @@ cc_defaults {
         "libutils",
         "libcutils", // tracing.
 
-        "libfruit",  // dependency injection.
         // TODO: remove these annoying dependencies by hiding them in the main library code.
     ],
-
-    header_libs: ["librxcpp"],
 }
 
 cc_library_shared {
@@ -120,48 +117,9 @@ cc_binary {
     ],
 }
 
-cc_library_static {
-    name: "libiorap-inode2filename",
-    defaults: [
-        "iorap-default-flags",
-        "iorap-default-dependencies",
-    ],
-
-    srcs: [
-        "src/inode2filename/**/*.cc",
-    ],
-}
-
-cc_binary {
-  name: "iorap.inode2filename",
-  defaults: [
-      "iorap-default-flags",
-      "iorap-default-dependencies",
-  ],
-  srcs: [
-      "src/inode2filename/**/*.cc",
-  ],
-  // Easier debugging. TODO: make a separate debug config.
-  // XX: Using -O0 seems to completely hide some errors.
-  cflags: ["-O2", "-UNDEBUG", "-DIORAP_INODE2FILENAME_MAIN=1"],
-  sanitize: {
-    undefined: true,
-    all_undefined: true,
-    // Pretty print when ubsan detects a problem.
-    // Otherwise it just calls abort().
-
-/*
-    diag: {
-      undefined: true,
-    },
-    */ // don't use the diag when you want it to crash.
-  },
-}
-
 cc_test {
     name: "iorapd-tests",
     test_suites: ["device-tests"],
-    gtest: false,  // we use gtest *and* gmock.
     defaults: [
         "iorap-default-flags",
         "iorap-default-dependencies",
@@ -169,6 +127,4 @@ cc_test {
     srcs: [
         "tests/src/**/*.cc",
     ],
-    cflags: ["-O2", "-UNDEBUG"],
-    static_libs: ["libgmock_main", "libgmock", "libgtest", "libiorap-inode2filename"],
 }
