@@ -16,6 +16,7 @@
 
 #include "binder/iiorap_impl.h"
 #include "common/debug.h"
+#include "manager/event_manager.h"
 
 #include <android-base/logging.h>
 #include <android-base/properties.h>
@@ -56,16 +57,16 @@ int main(int /*argc*/, char** argv) {
   // Logs go to system logcat.
   android::base::InitLogging(argv, StderrAndLogdLogger{android::base::SYSTEM});
 
-  // TODO: an selinux context is required, otherwise clients are rejected when trying to
-  // find this service.
-
-  // Testing workaround: use 'adb shell setenforce 0'
   {
     android::ScopedTrace trace_main{ATRACE_TAG_PACKAGE_MANAGER, "main"};
     LOG(INFO) << kServiceName << " (the prefetchening) firing up";
 
     android::ScopedTrace trace_start{ATRACE_TAG_PACKAGE_MANAGER, "IorapNativeService::start"};
-    if (!iorap::binder::IIorapImpl::Start()) {
+
+    // TODO: use fruit for this DI.
+    auto /*std::shared_ptr<EventManager>*/ event_manager =
+        iorap::manager::EventManager::Create();
+    if (!iorap::binder::IIorapImpl::Start(std::move(event_manager))) {
       LOG(ERROR) << "Unable to start IorapNativeService";
       exit(1);
     }

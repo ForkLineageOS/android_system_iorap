@@ -47,6 +47,18 @@ cc_defaults {
         "src",
     ],
 
+    /*
+    TODO: Header refactoring cleanup:
+
+    Option 1): Move src/$component/file_name.h to src/$component/include/$component/file_name.h
+    Option 2): Symlink src/$component/include/$component to src/$component
+
+    Set export_include_dirs to '$component/include' for that component.
+
+    Also delete the 'include' directory unless we have code other non-iorap
+    targets are allowed to reference.
+    */
+
     clang: true,
     shared_libs: ["libbase"],
 }
@@ -99,6 +111,9 @@ cc_library_static {
         include_dirs: ["frameworks/native/aidl/binder"],
         export_aidl_headers: true,
     },
+    static_libs: [
+       "libplatformprotos",  // android framework C++ protos.
+    ],
 }
 
 cc_defaults {
@@ -131,9 +146,13 @@ cc_binary {
     defaults: [
         "iorap-default-flags",
         "iorap-default-dependencies",
+        "libiorap-manager-default-dependencies",
     ],
     srcs: [
         "src/iorapd/main.cc",
+    ],
+    static_libs: [
+        "libiorap-manager",
     ],
     init_rc: [
         "iorapd.rc",
@@ -190,6 +209,8 @@ cc_test {
         "tests/src/**/*.cc",
     ],
     cflags: ["-O2", "-UNDEBUG"],
+
+    // TODO:  we should probably have per-component tests.
     static_libs: ["libgmock_main", "libgmock", "libgtest", "libiorap-inode2filename"],
 }
 
