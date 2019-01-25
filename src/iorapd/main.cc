@@ -15,8 +15,10 @@
  */
 
 #include "binder/iiorap_impl.h"
+#include "common/debug.h"
 
 #include <android-base/logging.h>
+#include <android-base/properties.h>
 #include <binder/IPCThreadState.h>
 #include <utils/Trace.h>
 
@@ -46,8 +48,10 @@ class StderrAndLogdLogger {
 };
 
 int main(int /*argc*/, char** argv) {
-  // Log everything!! TODO: less aggressive logging once this is closer to being shipped.
-  setenv("ANDROID_LOG_TAGS", "*:v", /*overwrite*/ 1);
+  if (android::base::GetBoolProperty("iorapd.log.verbose", iorap::kIsDebugBuild)) {
+    // Show verbose logs if the property is enabled or if we are a debug build.
+    setenv("ANDROID_LOG_TAGS", "*:v", /*overwrite*/ 1);
+  }
 
   // Logs go to system logcat.
   android::base::InitLogging(argv, StderrAndLogdLogger{android::base::SYSTEM});
