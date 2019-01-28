@@ -56,34 +56,29 @@ cc_defaults {
 
     static_libs: [
         "libiorap-binder",
+        "libplatformprotos",  // android framework C++ protos.
     ],
     shared_libs: [
-        "libiorap",
         "libbinder",
         "libutils",
         "libcutils", // tracing.
 
         "libfruit",  // dependency injection.
         // TODO: remove these annoying dependencies by hiding them in the main library code.
+
+        // dependency for libplatformprotos
+        // "libprotobuf-cpp-lite",
+
+        // libplatformprotos has an indirect dependency on full, causing compilation/linking
+        // errors if we use lite
+        "libprotobuf-cpp-full",
     ],
+
+    // srcs: [":libprotobuf-internal-protos"],
+    // commented out because it causes compilation errors
+    // TODO: can we use the lite library somehow?
 
     header_libs: ["librxcpp"],
-}
-
-cc_library_shared {
-    name: "libiorap",
-    defaults: [
-        "iorap-default-flags",
-    ],
-    srcs: [
-    ],
-
-    //export_include_dirs: ["include"],
-    //local_include_dirs: ["src/native"],
-
-    static_libs: [
-        "libprotobuf-cpp-lite",
-    ],
 }
 
 cc_library_static {
@@ -104,6 +99,31 @@ cc_library_static {
         include_dirs: ["frameworks/native/aidl/binder"],
         export_aidl_headers: true,
     },
+}
+
+cc_defaults {
+    name: "libiorap-manager-default-dependencies",
+    static_libs: [
+        "libiorap-perfetto",
+    ],
+    defaults: [
+        "libiorap-perfetto-default-dependencies",
+    ],
+    // Users of 'libiorap-manager' also need to include these defaults to avoid
+    // linking errors.
+}
+
+cc_library_static {
+    name: "libiorap-manager",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+        "libiorap-manager-default-dependencies",
+    ],
+
+    srcs: [
+        "src/manager/**.cc",
+    ],
 }
 
 cc_binary {
@@ -171,4 +191,84 @@ cc_test {
     ],
     cflags: ["-O2", "-UNDEBUG"],
     static_libs: ["libgmock_main", "libgmock", "libgtest", "libiorap-inode2filename"],
+}
+
+filegroup {
+  name: "libiorap-perfetto-protos",
+  srcs: [
+  ],
+}
+
+// Static libraries cannot export their dependencies,
+// the current convention is to use an extra 'defaults' rule for statics
+// to bring in all the dependencies.
+cc_defaults {
+    name: "libiorap-perfetto-default-dependencies",
+
+    // Some of the libperfetto header typedefs leak out into iorap.
+    // Avoids compilation #include errors.
+    // TODO: clean this up, the headers should not leak out (maybe all we need is a PerfettoConsumer
+    // forward declaration?).
+    include_dirs: ["external/perfetto/include"],
+    // Various perfetto protos are used directly by iorap.
+    //
+    // Furthermore, we need this regardless to avoid linking errors when linking
+    // libiorap-perfetto.a into the main cc_binary rule.
+    static_libs: [
+        "perfetto_trace_protos",
+    ],
+
+    shared_libs: [
+        // Not part of true dependencies: Users of 'libiorap-perfetto' do not link against
+        // libperfetto.
+        // We only put this to avoid linking errors when building iorapd.
+        // TODO: can we split iorapd into libiorapd-main that doesn't link against libperfetto?
+        // only the last cc_binary should need the full transitive closure of the dependency graph.
+        "libperfetto",
+    ]
+}
+
+cc_library_static {
+    name: "libiorap-perfetto",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+        "libiorap-perfetto-default-dependencies",
+    ],
+
+    srcs: [
+        "src/perfetto/**/*.cc",
+    ],
+}
+
+cc_binary {
+  name: "iorap.cmd.perfetto",
+  defaults: [
+      "iorap-default-flags",
+      "iorap-default-dependencies",
+  ],
+  shared_libs: ["libperfetto"],
+  include_dirs: ["external/perfetto/include"],
+  srcs: [
+      "src/perfetto/**/*.cc",
+  ],
+  // Easier debugging. TODO: make a separate debug config.
+  // XX: Using -O0 seems to completely hide some errors.
+  cflags: ["-O2", "-UNDEBUG", "-DIORAP_PERFETTO_MAIN=1"],
+  sanitize: {
+    undefined: true,
+    all_undefined: true,
+    // Pretty print when ubsan detects a problem.
+    // Otherwise it just calls abort().
+
+/*
+    diag: {
+      undefined: true,
+    },
+    */ // don't use the diag when you want it to crash.
+  },
+
+  static_libs: [
+    "perfetto_trace_protos",
+  ],
 }
