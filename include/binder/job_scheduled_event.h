@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef IORAP_BINDER_TASK_RESULT_H_
-#define IORAP_BINDER_TASK_RESULT_H_
+#ifndef IORAP_BINDER_JOB_SCHEDULED_EVENT_H_
+#define IORAP_BINDER_JOB_SCHEDULED_EVENT_H_
 
 #include "binder/common.h"
 #include "binder/auto_parcelable.h"
@@ -24,33 +24,36 @@
 namespace iorap {
 namespace binder {
 
-struct TaskResult : public AutoParcelable<TaskResult> {
-  enum class State : int32_t {
-    kBegan = 0,
-    kOngoing = 1,
-    kCompleted = 2,
-    kError = 3,
-    kMax = kError,
+struct JobScheduledEvent : public AutoParcelable<JobScheduledEvent> {
+  enum class Type : int32_t {
+    kStartJob = 0,
+    kStopJob = 1,
   };
 
-  State state;
+  Type type;
+  int32_t job_id;
 
-  TaskResult() = default;
-  explicit TaskResult(State state) : state(state) {}
+  enum class Sort : int32_t {
+    kIdleMaintenance = 0,
+  };
 
-  constexpr bool operator==(const TaskResult& other) const {
-    return state == other.state;
+  Sort sort;
+
+  constexpr bool operator==(const JobScheduledEvent& other) const {
+    return type == other.type
+        && job_id == other.job_id
+        && sort == other.sort;
   }
 
-  constexpr bool operator!=(const TaskResult& other) const {
+  constexpr bool operator!=(const JobScheduledEvent& other) const {
     return !(*this == other);
   }
 };
 
-IORAP_INTROSPECT_ADAPT_STRUCT(TaskResult, state);
+IORAP_INTROSPECT_ADAPT_STRUCT(JobScheduledEvent, type, job_id, sort);
 
 }
 }
-IORAP_JAVA_NAMESPACE_BINDER_TYPEDEF(TaskResult)
+IORAP_JAVA_NAMESPACE_BINDER_TYPEDEF(JobScheduledEvent)
 
-#endif  // IORAP_BINDER_TASK_RESULT_H_
+#endif  // IORAP_BINDER_JOB_SCHEDULED_EVENT_H_

@@ -76,9 +76,30 @@ static std::atomic<bool> s_service_params_ready_{false};
 static ServiceParams s_service_params_;
 static std::atomic<ServiceParams*> s_service_params_atomic_;
 
+
+
 }  // namespace anonymous
 
 class IIorapImpl::Impl {
+  // ITaskListener implementation for iorap::manager::EventManager.
+  struct EventManagerTaskCallbacks : public iorap::manager::TaskResultCallbacks {
+    explicit EventManagerTaskCallbacks(iorap::borrowed<IIorapImpl::Impl*> impl) {
+      CHECK(impl != nullptr);
+      impl_ = impl;
+    }
+
+    virtual void OnProgress(iorap::binder::RequestId request_id, iorap::binder::TaskResult task_result) override {
+      impl_->ReplyWithResult(request_id, /*completed*/false, std::move(task_result));
+    }
+    virtual void OnComplete(iorap::binder::RequestId request_id, iorap::binder::TaskResult task_result) override {
+      impl_->ReplyWithResult(request_id, /*completed*/true, std::move(task_result));
+    }
+
+    virtual ~EventManagerTaskCallbacks() {}
+
+    iorap::borrowed<IIorapImpl::Impl*> impl_;
+  };
+
  public:
   void SetTaskListener(const ::android::sp<ITaskListener>& listener) {
     ::android::sp<ITaskListener> old_listener = listener_;
@@ -111,6 +132,26 @@ class IIorapImpl::Impl {
     }
   }
 
+  void ReplyWithResult(const RequestId& request_id, bool completed, TaskResult result) {
+    ::android::sp<ITaskListener> listener = listener_;
+    if (listener == nullptr) {
+      // No listener. Cannot send anything back to the client.
+      // This could be normal, e.g. client had set listener to null before disconnecting.
+      LOG(WARNING) << "Drop result, no listener registered.";
+      // TODO: print the result with ostream operator<<
+      return;
+    }
+
+    // TODO: verbose, not info.
+    if (completed) {
+      LOG(VERBOSE) << "ITaskListener::onComplete (request_id=" << request_id.request_id << ")";
+      listener->onComplete(request_id, result);
+    } else {
+      LOG(VERBOSE) << "ITaskListener::onProgress (request_id=" << request_id.request_id << ")";
+      listener->onProgress(request_id, result);
+    }
+  }
+
   bool OnAppLaunchEvent(const RequestId& request_id,
                         const AppLaunchEvent& event) {
     if (MaybeHandleFakeBehavior(request_id)) {
@@ -118,6 +159,15 @@ class IIorapImpl::Impl {
     }
 
     return service_params_.event_manager_->OnAppLaunchEvent(request_id, event);
+  }
+
+  bool  OnJobScheduledEvent(const RequestId& request_id,
+                            const JobScheduledEvent& event) {
+    if (MaybeHandleFakeBehavior(request_id)) {
+      return true;
+    }
+
+    return service_params_.event_manager_->OnJobScheduledEvent(request_id, event);
   }
 
   void HandleFakeBehavior(const RequestId& request_id) {
@@ -141,11 +191,15 @@ class IIorapImpl::Impl {
 
   ::android::sp<ITaskListener> listener_;
 
-  Impl(ServiceParams p) : service_params_{std::move(p)} {
+  Impl(ServiceParams p) : service_params_{std::move(p)}, event_manager_callbacks_{new EventManagerTaskCallbacks{this}} {
     CHECK(service_params_.event_manager_ != nullptr);
+
+    service_params_.event_manager_->SetTaskResultCallbacks(
+      std::static_pointer_cast<manager::TaskResultCallbacks>(event_manager_callbacks_));
   }
 
   ServiceParams service_params_;
+  std::shared_ptr<EventManagerTaskCallbacks> event_manager_callbacks_;
 };
 
 using Impl = IIorapImpl::Impl;
@@ -245,6 +299,31 @@ Status SendArgs(const char* function_name,
   MAYBE_HAVE_FAKE_BEHAVIOR(self, request_id);
 
   if (self->OnAppLaunchEvent(request_id, app_launch_event)) {
+    return Status::ok();
+  } else {
+    // TODO: I suppose this should write out an exception back,
+    // like a service-specific error or something.
+    //
+    // It depends on whether or not we even have any synchronous
+    // errors.
+    //
+    // Most of the work here is done async, so it should handle
+    // async callbacks.
+    return Status::fromStatusT(::android::BAD_VALUE);
+  }
+}
+
+template <typename ... Args>
+Status SendArgs(const char* function_name,
+                Impl* self,
+                const RequestId& request_id,
+                const JobScheduledEvent& event) {
+  DCHECK_EQ(std::string(function_name), "onJobScheduledEvent");
+  LOG(VERBOSE) << "IIorap::onJobScheduledEvent";
+
+  MAYBE_HAVE_FAKE_BEHAVIOR(self, request_id);
+
+  if (self->OnJobScheduledEvent(request_id, event)) {
     return Status::ok();
   } else {
     // TODO: I suppose this should write out an exception back,

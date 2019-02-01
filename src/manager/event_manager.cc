@@ -29,8 +29,11 @@ using rxcpp::observe_on_one_worker;
 
 namespace iorap::manager {
 
-using binder::RequestId;
 using binder::AppLaunchEvent;
+using binder::JobScheduledEvent;
+using binder::RequestId;
+using binder::TaskResult;
+
 using perfetto::PerfettoStreamCommand;
 using perfetto::PerfettoTraceProto;
 
@@ -387,6 +390,61 @@ struct AppLaunchEventSubject {
   std::optional<rxcpp::subscriber<RefWrapper>> subscriber_;
 };
 
+// Convert callback pattern into reactive pattern.
+struct JobScheduledEventSubject {
+  JobScheduledEventSubject() {}
+
+  void Subscribe(rxcpp::subscriber<std::pair<RequestId, JobScheduledEvent>> subscriber) {
+    DCHECK(ready_ != true) << "Cannot Subscribe twice";
+
+    subscriber_ = std::move(subscriber);
+
+    // Release edge of synchronizes-with AcquireIsReady.
+    ready_.store(true);
+  }
+
+  void OnNext(RequestId request_id, JobScheduledEvent e) {
+    if (!AcquireIsReady()) {
+      return;
+    }
+
+    if (!subscriber_->is_subscribed()) {
+      return;
+    }
+
+    subscriber_->on_next(std::pair<RequestId, JobScheduledEvent>{std::move(request_id), std::move(e)});
+
+  }
+
+  void OnCompleted() {
+    if (!AcquireIsReady()) {
+      return;
+    }
+
+    subscriber_->on_completed();
+  }
+
+ private:
+  bool AcquireIsReady() {
+    // Synchronizes-with the release-edge in Subscribe.
+    // This can happen much later, only once the subscription actually happens.
+
+    // However, as far as I know, 'rxcpp::subscriber' is not thread safe,
+    // (but the observable chain itself can be made thread-safe via #observe_on, etc).
+    // so we must avoid reading it until it has been fully synchronized.
+    //
+    // TODO: investigate rxcpp subscribers and see if we can get rid of this atomics,
+    // to make it simpler.
+    return ready_.load();
+  }
+
+  // TODO: also track the RequestId ?
+
+  std::atomic<bool> ready_{false};
+
+  std::optional<rxcpp::subscriber<std::pair<RequestId, JobScheduledEvent>>> subscriber_;
+};
+
 class EventManager::Impl {
  public:
   Impl(/*borrow*/perfetto::RxProducerFactory& perfetto_factory)
@@ -403,6 +461,13 @@ class EventManager::Impl {
     } else {
       LOG(WARNING) << "Tracing disabled by iorapd.perfetto.enable=false";
     }
+
+    rx_lifetime_jobs_ = InitializeRxGraphForJobScheduledEvents();
+  }
+
+  void SetTaskResultCallbacks(std::shared_ptr<TaskResultCallbacks> callbacks) {
+    DCHECK(callbacks_.expired());
+    callbacks_ = callbacks;
   }
 
   bool OnAppLaunchEvent(RequestId request_id,
@@ -414,6 +479,16 @@ class EventManager::Impl {
     app_launch_event_subject_.OnNext(event);
 
     return true;
+  }
+
+  bool OnJobScheduledEvent(RequestId request_id,
+                           const JobScheduledEvent& event) {
+    LOG(VERBOSE) << "EventManager::OnJobScheduledEvent("
+                 << "request_id=" << request_id.request_id << ",event=TODO).";
+
+    job_scheduled_event_subject_.OnNext(std::move(request_id), event);
+
+    return true;  // No errors.
   }
 
   rxcpp::composite_subscription InitializeRxGraph() {
@@ -442,12 +517,98 @@ class EventManager::Impl {
     return lifetime;
   }
 
+  rxcpp::composite_subscription InitializeRxGraphForJobScheduledEvents() {
+    LOG(VERBOSE) << "EventManager::InitializeRxGraphForJobScheduledEvents";
+
+    using RequestAndJobEvent = std::pair<RequestId, JobScheduledEvent>;
+
+    job_scheduled_events_ = rxcpp::observable<>::create<RequestAndJobEvent>(
+      [&](rxcpp::subscriber<RequestAndJobEvent> subscriber) {
+        job_scheduled_event_subject_.Subscribe(std::move(subscriber));
+      });
+
+    rxcpp::composite_subscription lifetime;
+
+    job_scheduled_events_
+      .observe_on(worker_thread_)  // async handling.
+      .tap([this](const RequestAndJobEvent& e) {
+        LOG(VERBOSE) << "EventManager#JobScheduledEvent#tap(1) - job begins";
+        this->NotifyProgress(e.first, TaskResult{TaskResult::State::kBegan});
+
+        // TODO: probably this shouldn't be emitted until most of the usual DCHECKs
+        // (for example, validate a job isn't already started, the request is not reused, etc).
+        // In this way we could block from the client until it sees 'kBegan' and Log.wtf otherwise.
+      })
+      .tap([](const RequestAndJobEvent& e) {
+        // TODO. Actual work.
+        LOG(VERBOSE) << "EventManager#JobScheduledEvent#tap(2) - job is being processed";
+
+        // TODO: abort functionality for in-flight jobs.
+        //
+        // maybe something like scan that returns an observable<Job> + flat map to that job.
+        // then we could unsubscribe from the scan to do a partial abort? need to try it and see if it works.
+        //
+        // other option is to create a new outer subscription for each job id which seems less ideal.
+      })
+      .subscribe(/*out*/lifetime,
+        /*on_next*/
+        [this](const RequestAndJobEvent& e) {
+          LOG(VERBOSE) << "EventManager#JobScheduledEvent#subscribe - job completed";
+          this->NotifyComplete(e.first, TaskResult{TaskResult::State::kCompleted});
+        }
+#if 0
+        ,
+        /*on_error*/
+        [](rxcpp::util::error_ptr err) {
+          LOG(ERROR) << "Scheduled job event failed: " << rxcpp::util::what(err);
+
+          //std::shared_ptr<TaskResultCallbacks> callbacks = callbacks_.lock();
+          //if (callbacks != nullptr) {
+            // FIXME: How do we get the request ID back out of the error? Seems like a problem.
+            // callbacks->OnComplete(, TaskResult{TaskResult::kError});
+            // We may have to wrap with an iorap::expected instead of using on_error.
+          //}
+
+          // FIXME: need to add a 'OnErrorResumeNext' operator?
+          DCHECK(false) << "forgot to implement OnErrorResumeNext";
+        }
+#endif
+      );
+
+    // TODO: error output should happen via an observable.
+
+    return lifetime;
+  }
+
+  void NotifyComplete(RequestId request_id, TaskResult result) {
+      std::shared_ptr<TaskResultCallbacks> callbacks = callbacks_.lock();
+      if (callbacks != nullptr) {
+        callbacks->OnComplete(std::move(request_id), std::move(result));
+      } else {
+        LOG(WARNING) << "EventManager: TaskResultCallbacks may have been released early";
+      }
+  }
+
+  void NotifyProgress(RequestId request_id, TaskResult result) {
+      std::shared_ptr<TaskResultCallbacks> callbacks = callbacks_.lock();
+      if (callbacks != nullptr) {
+        callbacks->OnProgress(std::move(request_id), std::move(result));
+      } else {
+        LOG(WARNING) << "EventManager: TaskResultCallbacks may have been released early";
+      }
+  }
+
   perfetto::RxProducerFactory& perfetto_factory_;
   bool tracing_allowed_{true};
+
+  std::weak_ptr<TaskResultCallbacks> callbacks_;  // avoid cycles with weakptr.
 
   using AppLaunchEventRefWrapper = AppLaunchEventSubject::RefWrapper;
   rxcpp::observable<AppLaunchEventRefWrapper> app_launch_events_;
   AppLaunchEventSubject app_launch_event_subject_;
+
+  rxcpp::observable<std::pair<RequestId, JobScheduledEvent>> job_scheduled_events_;
+  JobScheduledEventSubject job_scheduled_event_subject_;
 
   rxcpp::observable<RequestId> completed_requests_;
 
@@ -457,7 +618,8 @@ class EventManager::Impl {
   // low priority idle-class thread for IO operations.
   observe_on_one_worker io_thread_;
 
-  rxcpp::composite_subscription rx_lifetime_;
+  rxcpp::composite_subscription rx_lifetime_;  // app launch events
+  rxcpp::composite_subscription rx_lifetime_jobs_;  // job scheduled events
 
 //INTENTIONAL_COMPILER_ERROR_HERE:
   // FIXME:
@@ -488,9 +650,18 @@ std::shared_ptr<EventManager> EventManager::Create(perfetto::RxProducerFactory& 
   return p;
 }
 
+void EventManager::SetTaskResultCallbacks(std::shared_ptr<TaskResultCallbacks> callbacks) {
+  return impl_->SetTaskResultCallbacks(std::move(callbacks));
+}
+
 bool EventManager::OnAppLaunchEvent(RequestId request_id,
                                     const AppLaunchEvent& event) {
   return impl_->OnAppLaunchEvent(request_id, event);
+}
+
+bool EventManager::OnJobScheduledEvent(RequestId request_id,
+                                       const JobScheduledEvent& event) {
+  return impl_->OnJobScheduledEvent(request_id, event);
 }
 
 }  // namespace iorap::manager
