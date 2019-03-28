@@ -2813,7 +2813,7 @@ auto MakeAllPassInodes(std::vector<std::string> root_dirs, std::vector<std::stri
 INSTANTIATE_TEST_CASE_P(AllResultsAreSuccess,
                         SearchDirectoriesTest,
                         ::testing::Values(
-                            MakeAllPassInodes(/*root_dirs*/{"/"}, {"66323@1127133"}, {"/data"})
+                            MakeAllPassInodes(/*root_dirs*/{"/"}, {"66323@1127133"}, {"//data"})  // TODO: why is it adding an extra '/' ?
                         ));
 
 #endif

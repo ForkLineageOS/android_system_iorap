@@ -55,6 +55,9 @@ struct PerfettoDependencies {
 // encoded under the hood.
 template <typename T>
 struct BinaryWireProtobuf {
+  static_assert(std::is_base_of_v<::google::protobuf::MessageLite, T>,
+                "T should be a base class of MessageLite");
+
   std::vector<std::byte>& data() {
     return data_;
   }

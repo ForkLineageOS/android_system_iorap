@@ -160,6 +160,33 @@ struct InodeSet {
     return std::nullopt;
   }
 
+  // Match all fields of an Inode against another Inode.
+  //
+  // The returned Inode (if any) is removed from the InodeSet; it will not be returned by
+  // FindInodeList in future calls.
+  std::optional<Inode> FindAndRemoveInodeInList(ValueRange inode_list,
+                                                const Inode& inode) {
+    LOG(VERBOSE) << "FindAndRemoveInodeInList " << inode_list << ", "
+                 << inode << "}";
+
+    auto /*iterator*/ found = std::find_if(inode_list.begin(),
+                                           inode_list.end(),
+                                           [&](const std::pair<ino_t, Inode>& pair) {
+      return inode == pair.second;
+    });
+
+    if (found != inode_list.end()) {
+      const Inode& inode = found->second;
+      LOG(VERBOSE) << "InodeSet:FindAndRemoveInodeInList *success* inode+device " << inode;
+      DCHECK_EQ(found->second, inode);
+      // Erase the inode from the list. This is important.
+      set_.erase(found);
+      return inode;
+    }
+
+    return std::nullopt;
+  }
+
   // TODO: equality and string operators for testing/logging.
  private:
   // Explanation: readdir returns a 'file' -> 'ino_t inode' mapping.
@@ -641,7 +668,8 @@ struct StatError {
 };
 
 std::ostream& operator<<(std::ostream& os, const StatError& e) {
-  os << "StatError{" << e.err_no << "," << e.path_name << "}";
+  os << "StatError{" << e.err_no << "," << e.path_name
+     << ": " << strerror(e.err_no) << "}";
   return os;
 }
 
@@ -933,4 +961,357 @@ rxcpp::observable<InodeResult>
     }
   );
 }
+
+auto/*[observable<InodeResult>]*/ EmitAllInodesFromDirectories(
+    std::vector<std::string> root_dirs,
+    borrowed<SystemCall*> system_call) {
+
+  // Create a (lazy) observable that will emit each DirectoryEntry that is a recursive subchild
+  // of root_dirs. Emission will be stopped when its unsubscribed from.
+  //
+  // This is done by calling readdir(3) lazily.
+  auto/*obs<DirectoryEntry>*/ find_all_subdir_entries = ([&]() {
+    DirectoryEntry sentinel = DirectoryEntry::CreateSentinel(std::move(root_dirs));
+    auto/*obs<DirectoryEntryResult*/ results = sentinel.GetSubTreePreOrderEntries(system_call);
+
+    // Drop any errors by logging them to logcat. "Unwrap" the expected into the underlying data.
+    auto/*obs<DirectoryEntry*>*/ expected_drop_errors = MapExpectedOrLogError(std::move(results));
+    return expected_drop_errors;
+  })();
+
+  // Fill in -1 for the dev_t since readdir only returns the ino_t.
+  // The caller of this function is expected to call stat(2) later on to fill in
+  // the full data.
+  return find_all_subdir_entries.map([](DirectoryEntry e) {
+    return InodeResult::makeSuccess(Inode::FromDeviceAndInode(-1, e.d_ino), std::move(e.filename));
+  });
+}
+
+rxcpp::observable<InodeResult>
+    SearchDirectories::ListAllFilenames(std::vector<std::string> root_directories) const {
+  // TODO: refactor implementation into DiskScanDataSource.
+  return EmitAllInodesFromDirectories(std::move(root_directories),
+                                      /*borrowed*/system_call_);
+}
+
+struct FilterState {
+  // Emit 'match' Inodes corresponding to the ones here.
+  InodeSet inode_set;
+
+  // An inode matching one of the ones in inode_set was discovered in the most-recently
+  // emitted SearchState.
+  //
+  // The InodeSet removes any matching 'Inode'.
+  std::optional<InodeResult> match;
+
+  // TODO: make sure this doesn't copy [inodes], as that would be unnecessarily expensive.
+};
+
+std::ostream& operator<<(std::ostream& os, const FilterState& s) {
+  os << "FilterState{match:";
+  // Print the 'match' first. The InodeSet could be very large so it could be truncated in logs.
+  if (s.match) {
+    os << s.match.value();
+  } else {
+    os << "(none)";
+  }
+  os << ", inode_set:" << s.inode_set << "}";
+  return os;
+}
+
+rxcpp::observable<InodeResult> SearchDirectories::FilterFilenamesForSpecificInodes(
+    rxcpp::observable<InodeResult> all_inodes,
+    std::vector<Inode> inode_list,
+    bool missing_device_number,   // missing dev_t portion?
+    bool needs_verification) const {
+  // TODO: refactor into InodeResolver
+
+  borrowed<SystemCall*> system_call = system_call_;
+
+  // InodeResult may be missing the dev_t portion, so we may need to call scan(2) again
+  // to confirm the dev_t. We skip calling scan(2) when the ino_t does not match.
+  // InodeSet lets us optimally avoid calling scan(2).
+  FilterState initial;
+  initial.inode_set = InodeSet::OfList(inode_list);
+
+  auto/*[observable<FilterState>,Connectable]*/ filter_state_results = all_inodes.scan(
+      std::move(initial),
+      [system_call, missing_device_number]
+          (FilterState filter_state, InodeResult inode_result) {
+        LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#Scan "
+                     << inode_result << ", state: " << filter_state;
+
+        filter_state.match = std::nullopt;
+
+        InodeSet* inodes = &filter_state.inode_set;
+
+        // Find all the possible (dev_t, ino_t) potential needles given an ino_t in the haystack.
+        InodeSet::ValueRange inode_list = inodes->FindInodeList(inode_result.inode.inode);
+
+        // This inode result doesn't correspond to any inodes we are searching for.
+        if (!inode_list) {
+          // Drop the result and keep going.
+          return filter_state;
+        }
+
+        if (missing_device_number) {
+          // Need to fill in dev_t by calling stat(2).
+          VisitValueOrLogError(std::move(inode_result.data), [&](std::string filename) {
+            StatResult maybe_stat = Stat(filename, system_call);
+            VisitValueOrLogError(maybe_stat, [&](const struct stat& stat_buf) {
+              // Try to match the specific inode. Usually this will not result in a match (nullopt).
+              std::optional<Inode> inode = inodes->FindAndRemoveInodeInList(inode_list, stat_buf);
+
+              if (inode) {
+                filter_state.match = InodeResult::makeSuccess(inode.value(), std::move(filename));
+              }
+            });
+
+            // Note: stat errors are logged here to make the error closer to the occurrence.
+            // In theory, we could just return it as an InodeResult but then the error would
+            // just get logged elsewhere.
+          });
+        } else {
+            // Trust the dev_t in InodeResult is valid. Later passes can verify it.
+
+            // Try to match the specific inode. Usually this will not result in a match (nullopt).
+            std::optional<Inode> inode =
+                inodes->FindAndRemoveInodeInList(inode_list, inode_result.inode);
+
+            if (inode) {
+              filter_state.match = inode_result;
+            }
+
+            // Note that the InodeResult doesn't necessarily need to have a valid filename here.
+            // If the earlier pass returned an error-ed result, this will forward the error code.
+        }
+
+        return filter_state;  // implicit move.
+      }
+  // Avoid exhausting a potentially 'infinite' stream of files by terminating as soon
+  // as we find every single inode we care about.
+  ).take_while([](const FilterState& state) {
+      // Also emit the last item that caused the search set to go empty.
+      bool cond = !state.inode_set.Empty() || state.match;
+
+      if (WOULD_LOG(VERBOSE)) {
+        static int kCounter = 0;
+        LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#take_while (" << kCounter++ <<
+                     ",is_empty:"
+                     << state.inode_set.Empty() << ", match:" << state.match.has_value();
+      }
+      // Minor O(1) implementation inefficiency:
+      // (Too minor to fix but it can be strange if looking at the logs or readdir traces).
+      //
+      // Note, because we return 'true' after the search set went empty,
+      // the overall stream graph still pulls from filter_state_results exactly once more:
+      //
+      // This means that for cond to go to false, we would've read one extra item and then discarded
+      // it. If that item was the first child of a directory, that means we essentially did
+      // one redundant pass of doing a readdir.
+      // In other words if the search set goes to empty while the current item is a directory,
+      //
+      // it will definitely readdir on it at least once as we try to get the first child in
+      // OnTreeTraversal.
+      //
+      // This could be fixed with a 'take_until(Predicate)' operator which doesn't discard
+      // the last item when the condition becomes false. However rxcpp seems to lack this operator,
+      // whereas RxJava has it.
+
+      if (!cond) {
+        LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#take_while "
+                     << "should now terminate for " << state;
+      }
+
+      return cond;
+  }).publish();
+  // The publish here is mandatory. The stream is consumed twice (once by matched and once by
+  // unmatched streams). Without the publish, once all items from 'matched' were consumed it would
+  // start another instance of 'filter_state_results' (i.e. it appears as if the search
+  // is restarted).
+  //
+  // By using 'publish', the filter_state_results is effectively shared by both downstream nodes.
+  // Note that this also requires the subscriber to additionally call #connect on the above stream,
+  // otherwise no work will happen.
+
+  // Lifetime notes:
+  //
+  // The the 'FilterState' is emitted into both below streams simultaneously.
+  //    The 'unmatched_inode_values' only touches the inode_set.
+  //    The 'matched_inode_values' only touches the match.
+  // Either stream can 'std::move' from those fields because they don't move each other's fields.
+  auto/*observable<InodeResult>*/ matched_inode_values = filter_state_results
+      .filter([](const FilterState& filter_state) { return filter_state.match.has_value(); })
+      .map([](FilterState& filter_state) { return std::move(filter_state.match.value()); });
+                     // observable<InodeResult>
+
+  auto/*observable<?>*/ unmatched_inode_values = filter_state_results
+      // The 'last' FilterState is the one that contains all the remaining inodes.
+      .take_last(1)  // observable<FilterState>
+      .flat_map([](const FilterState& filter_state) {
+          LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#unmatched -- flat_map";
+          // Aside: Could've used a move here if the inodes weren't so lightweight already.
+          return filter_state.inode_set.IterateValues(); })
+                     // observable<Inode>
+      .map([](const Inode& inode) {
+          LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#unmatched -- map";
+          return InodeResult::makeFailure(inode, InodeResult::kCouldNotFindFilename);
+      });
+                     // observable<InodeResult>
+
+  // The matched and unmatched InodeResults are emitted together.
+  //   Use merge, not concat, because we need both observables to be subscribed to simultaneously.
+
+  auto/*observable<InodeResult*/ all_inode_results =
+      matched_inode_values.merge(unmatched_inode_values);
+
+  // Verify the inode results by calling stat(2).
+  // Unverified results are turned into an error.
+
+  auto/*observable<InodeResult>*/ verified_inode_results =
+    all_inode_results.map([needs_verification, system_call](InodeResult result) {
+      if (!needs_verification || !result) {
+        // Skip verification if requested, or if the result didn't have a filename.
+        return result;
+      }
+
+      const std::string& filename = result.data.value();
+      StatResult maybe_stat = Stat(filename, system_call);
+
+      if (maybe_stat)
+      {
+        if (result.inode == Inode::FromDeviceAndInode(maybe_stat->st_dev, maybe_stat->st_ino)) {
+          return result;
+        } else {
+          LOG(WARNING)
+              << "FilterFilenamesForSpecificInodes#verified fail out-of-date inode: " << result;
+          return InodeResult::makeFailure(result.inode, InodeResult::kVerificationFailed);
+        }
+      } else {
+        // Forward stat errors directly, as it could be a missing security rule,
+        // but turn -ENOENT into casual verification errors.
+        const StatError& err = maybe_stat.error();
+        int error_code = err.err_no;
+        if (err.err_no == ENOENT) {
+          error_code = InodeResult::kVerificationFailed;
+
+          // TODO: Don't LOG(WARNING) here because this could be very common if we
+          // access the data much much later after the initial results were read in.
+          LOG(WARNING)
+              << "FilterFilenamesForSpecificInodes#verified fail out-of-date filename: " << result;
+        } else {
+          LOG(ERROR)
+              << "FilterFilenamesForSpecificInodes#verified stat(2) failure: " << err;
+        }
+
+        return InodeResult::makeFailure(result.inode, error_code);
+      }
+    });
+
+  // Now that all mid-stream observables have been connected, turn the Connectable observable
+  // into a regular observable.
+  return verified_inode_results.ref_count(filter_state_results);
+}
+
+rxcpp::observable<InodeResult> SearchDirectories::EmitAllFilenames(
+    rxcpp::observable<InodeResult> all_inodes,
+    bool missing_device_number,   // missing dev_t portion?
+    bool needs_verification) const {
+  // TODO: refactor into InodeResolver
+
+  borrowed<SystemCall*> system_call = system_call_;
+
+  // InodeResult may be missing the dev_t portion, so we may need to call scan(2) again
+  // to confirm the dev_t.
+
+  using EmitAllState = std::optional<InodeResult>;
+
+  auto/*[observable<FilterState>,Connectable]*/ all_inode_results = all_inodes.map(
+      [system_call, missing_device_number](InodeResult inode_result) {
+        LOG(VERBOSE) << "EmitAllFilenames#map "
+                     << inode_result;
+
+        // Could fail if the device number is missing _and_ stat(2) fails.
+        EmitAllState match = std::nullopt;
+
+        if (missing_device_number) {
+          // Need to fill in dev_t by calling stat(2).
+          VisitValueOrLogError(std::move(inode_result.data), [&](std::string filename) {
+            StatResult maybe_stat = Stat(filename, system_call);
+            VisitValueOrLogError(maybe_stat, [&](const struct stat& stat_buf) {
+              Inode inode = Inode::FromDeviceAndInode(stat_buf.st_dev, stat_buf.st_ino);
+              match = InodeResult::makeSuccess(inode, std::move(filename));
+            });
+
+            // Note: stat errors are logged here to make the error closer to the occurrence.
+            // In theory, we could just return it as an InodeResult but then the error would
+            // just get logged elsewhere.
+          });
+        } else {
+            // Trust the dev_t in InodeResult is valid. Later passes can verify it.
+            match = std::move(inode_result);
+
+            // Note that the InodeResult doesn't necessarily need to have a valid filename here.
+            // If the earlier pass returned an error-ed result, this will forward the error code.
+        }
+
+        return match;  // implicit move.
+      }
+  );
+
+  auto/*observable<InodeResult>*/ matched_inode_values = all_inode_results
+      .filter([](const EmitAllState& filter_state) { return filter_state.has_value(); })
+      .map([](EmitAllState& filter_state) { return std::move(filter_state.value()); });
+                     // observable<InodeResult>
+
+  // Verify the inode results by calling stat(2).
+  // Unverified results are turned into an error.
+
+  auto/*observable<InodeResult>*/ verified_inode_results =
+    matched_inode_values.map([needs_verification, system_call](InodeResult result) {
+      if (!needs_verification || !result) {
+        // Skip verification if requested, or if the result didn't have a filename.
+        return result;
+      }
+
+      const std::string& filename = result.data.value();
+      StatResult maybe_stat = Stat(filename, system_call);
+
+      if (maybe_stat)
+      {
+        if (result.inode == Inode::FromDeviceAndInode(maybe_stat->st_dev, maybe_stat->st_ino)) {
+          return result;
+        } else {
+          LOG(WARNING)
+              << "EmitAllFilenames#verified fail out-of-date inode: " << result;
+          return InodeResult::makeFailure(result.inode, InodeResult::kVerificationFailed);
+        }
+      } else {
+        // Forward stat errors directly, as it could be a missing security rule,
+        // but turn -ENOENT into casual verification errors.
+        const StatError& err = maybe_stat.error();
+        int error_code = err.err_no;
+        if (err.err_no == ENOENT) {
+          error_code = InodeResult::kVerificationFailed;
+
+          // TODO: Don't LOG(WARNING) here because this could be very common if we
+          // access the data much much later after the initial results were read in.
+          LOG(WARNING)
+              << "EmitAllFilenames#verified fail out-of-date filename: " << result;
+        } else {
+          LOG(ERROR)
+              << "EmitAllFilenames#verified stat(2) failure: " << err;
+        }
+
+        return InodeResult::makeFailure(result.inode, error_code);
+      }
+    });
+
+  // TODO: refactor this function some more with the Find(inode_set) equivalent.
+
+  // Now that all mid-stream observables have been connected, turn the Connectable observable
+  // into a regular observable.
+  return verified_inode_results;
+}
+
 }  // namespace iorap::inode2filename
