@@ -257,6 +257,9 @@ bool IIorapImpl::Start(std::shared_ptr<manager::EventManager> event_manager) {
   // Release edge synchronizes-with the top of this function.
   s_service_started_.store(true);
 
+  // TODO: IIRC thread-start(t1) synchronizes-with t1.main, so we should be able
+  // to delete the majority of atomics for any pre-thread-start initialization...
+
   return true;
 }
 

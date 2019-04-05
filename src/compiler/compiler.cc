@@ -30,6 +30,7 @@
 
 #include "rxcpp/rx.hpp"
 #include <iostream>
+#include <fstream>
 #include <optional>
 
 #include <sched.h>
@@ -45,6 +46,9 @@ using Inode = iorap::inode2filename::Inode;
 using InodeResult = iorap::inode2filename::InodeResult;
 using SearchDirectories = iorap::inode2filename::SearchDirectories;
 
+template <typename T>
+using ProtobufPtr = iorap::perfetto::ProtobufPtr<T>;
+
 // Attempt to read protobufs from the filenames.
 // Emits one (or none) protobuf for each filename, in the same order as the filenames.
 // On any errors, the items are dropped (errors are written to the error LOG).
@@ -57,6 +61,7 @@ auto/*observable<ProtoT>*/ ReadProtosFromFileNames(rxcpp::observable<std::string
 
   return filenames
     .map([](const std::string& filename) {
+      LOG(VERBOSE) << "compiler::ReadProtosFromFileNames " << filename << " [begin]";
       std::optional<BinaryWireProtoT> maybe_proto =
           BinaryWireProtoT::ReadFullyFromFile(filename);
       if (!maybe_proto) {
@@ -71,7 +76,42 @@ auto/*observable<ProtoT>*/ ReadProtosFromFileNames(rxcpp::observable<std::string
       return std::move(proto.value());
     })  // TODO: refactor to something that flattens the optional, and logs in one operator.
     .map([](BinaryWireProtoT proto) {
-      std::optional<ProtoT> t = proto.template MaybeUnserialize<ProtoT>();
+      std::optional<ProtobufPtr<ProtoT>> t = proto.template MaybeUnserialize<ProtoT>();
+      if (!t) {
+        LOG(ERROR) << "Failed to parse protobuf: ";  // TODO: filename.
+      }
+      return t;
+    })
+    .filter([](const std::optional<ProtobufPtr<ProtoT>>& proto) {
+      return proto.has_value();
+    })
+    .map([](std::optional<ProtobufPtr<ProtoT>> proto) -> ProtobufPtr<ProtoT> {
+      LOG(VERBOSE) << "compiler::ReadProtosFromFileNames [success]";
+      return std::move(proto.value());
+      // TODO: protobufs have no move constructor. this might be inefficient?
+    });
+
+/*
+  return filenames
+    .map([](const std::string& filename) {
+      LOG(VERBOSE) << "compiler::ReadProtosFromFileNames " << filename << " [begin]";
+      std::optional<BinaryWireProtoT> maybe_proto =
+          BinaryWireProtoT::ReadFullyFromFile(filename);
+      if (!maybe_proto) {
+        LOG(ERROR) << "Failed to read file: " << filename;
+      }
+
+      std::unique_ptr<BinaryWireProtoT> ptr;
+      if (maybe_proto) {
+        ptr.reset(new BinaryWireProtoT{std::move(*maybe_proto)});
+      }
+      return ptr;
+    })
+    .filter([](const std::unique_ptr<BinaryWireProtoT>& proto) {
+      return proto != nullptr;
+    })
+    .map([](std::unique_ptr<BinaryWireProtoT>& proto) {
+      std::optional<ProtoT> t = proto->template MaybeUnserialize<ProtoT>();
       if (!t) {
         LOG(ERROR) << "Failed to parse protobuf: ";  // TODO: filename.
       }
@@ -81,15 +121,17 @@ auto/*observable<ProtoT>*/ ReadProtosFromFileNames(rxcpp::observable<std::string
       return proto.has_value();
     })
     .map([](std::optional<ProtoT> proto) -> ProtoT {
+      LOG(VERBOSE) << "compiler::ReadProtosFromFileNames [success]";
       return std::move(proto.value());
       // TODO: protobufs have no move constructor. this might be inefficient?
     });
+    */
 }
 
 auto/*observable<::perfetto::protos::Trace>*/ ReadPerfettoTraceProtos(
     std::vector<std::string> filenames) {
   auto filename_obs = rxcpp::observable<>::iterate(std::move(filenames));
-  rxcpp::observable<::perfetto::protos::Trace> obs =
+  rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> obs =
       ReadProtosFromFileNames<::perfetto::protos::Trace>(std::move(filename_obs));
   return obs;
 }
@@ -151,7 +193,6 @@ std::ostream& operator<<(std::ostream& os, const PageCacheFtraceEvent& e) {
   os << "add_to_page_cache:" << e.add_to_page_cache << ",";
   os << "pfn:" << e.pfn << ",";
   os << "i_ino:" << e.i_ino << ",";
-  os << "i_ino:" << e.i_ino << ",";
   os << "index:" << e.index << ",";
   os << "s_dev:" << e.s_dev << ",";
   os << "page:" << e.page;
@@ -186,7 +227,10 @@ std::ostream& operator<<(std::ostream& os, const PageCacheFtraceEvent& e) {
  */
 
 auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
-    ::perfetto::protos::Trace& trace) {
+    ProtobufPtr<::perfetto::protos::Trace> trace_ptr) {
+  const ::perfetto::protos::Trace& trace = *trace_ptr;
+
+  constexpr bool kDebugFunction = true;
 
   return rxcpp::observable<>::create<PageCacheFtraceEvent>(
       [trace=std::move(trace)](rxcpp::subscriber<PageCacheFtraceEvent> sub) {
@@ -219,8 +263,11 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
     for (const ::perfetto::protos::TracePacket& packet : trace.packet()) {
       // Break out of all loops if we are unsubscribed.
       if (!sub.is_subscribed()) {
+        if (kDebugFunction) LOG(VERBOSE) << "compiler::SelectPageCacheFtraceEvents unsubscribe";
         return;
       }
+
+      if (kDebugFunction) LOG(VERBOSE) << "compiler::SelectPageCacheFtraceEvents TracePacket";
 
       if (packet.has_timestamp()) {
         timestamp_relative_start = timestamp_relative_start.value_or(packet.timestamp());
@@ -242,8 +289,8 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
           }
 
           if (event.has_timestamp()) {
-            timestamp_relative_start = timestamp_relative_start.value_or(packet.timestamp());
-            timestamp = packet.timestamp();
+            timestamp_relative_start = timestamp_relative_start.value_or(event.timestamp());
+            timestamp = event.timestamp();
           } else {
             DCHECK(packet.has_timestamp() == false)
                 << "Timestamp in outer packet but not inner packet";
@@ -255,12 +302,20 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
           if (timestamp_relative_start) {
             // Otherwise this assumption is incorrect and we need an extra pass
             // to determine the minimum timestamp in a trace.
-            DCHECK_GE(timestamp, *timestamp_relative_start)
-                << "Ftrace timestamps must rise in value";
-            // TODO: if this fails, we can probably just do this in separate functions?
-            // this function is already becoming quite large.
+
+            // FIXME: handle this case:
+            if ((false)) {
+              DCHECK_GE(timestamp, *timestamp_relative_start)
+                  << "Ftrace timestamps must rise in value";
+              // TODO: if this fails, we can probably just do this in separate functions?
+              // this function is already becoming quite large.
+            }
 
             if (timestamp < *timestamp_relative_start) {  // when DCHECK is disabled.
+              LOG(WARNING) << "FIXME: Ftrace timestamps must rise in value: "
+                           << "timestamp=" << timestamp << "ns, "
+                           << "timestamp_relative=" << *timestamp_relative_start << "ns";
+
               // avoid underflow
               timestamp_relative = 0;
             } else {
@@ -268,6 +323,13 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
             }
           } else {
             timestamp_relative = 0;
+          }
+
+          {
+            // FIXME: add an extra pass to calculate minimum timestamp for proper relativeness.
+            // Using this workaround will 'break' proper optimal merging of multiple traces,
+            // but a single trace will still be compiled fine.
+            timestamp_relative = timestamp;
           }
 
           pid = event.pid();  // XX: has_pid ?
@@ -288,7 +350,15 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
             on_next_page_cache_event(mm_event);
           }
         }
+      } else {
+        if (kDebugFunction) {
+          LOG(VERBOSE) << "compiler::SelectPageCacheFtraceEvents no ftrace event bundle";
+        }
       }
+    }
+
+    if (kDebugFunction) {
+      LOG(VERBOSE) << "compiler::SelectPageCacheFtraceEvents#on_completed";
     }
 
     // Let subscriber know there are no more items.
@@ -297,11 +367,14 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
 }
 
 auto /*observable<Inode*/ SelectDistinctInodesFromTraces(
-    rxcpp::observable<::perfetto::protos::Trace> traces) {
+    rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> traces) {
   // Emit only unique (s_dev, i_ino) pairs from all Trace protos.
   auto obs = traces
-    .flat_map([](::perfetto::protos::Trace trace) {  // TODO: avoid copy.
-      rxcpp::observable<PageCacheFtraceEvent> obs = SelectPageCacheFtraceEvents(trace);
+    .flat_map([](ProtobufPtr<::perfetto::protos::Trace> trace) {
+      rxcpp::observable<PageCacheFtraceEvent> obs = SelectPageCacheFtraceEvents(std::move(trace));
+      // FIXME: dont check this in
+      // return obs;
+      //return obs.take(100);   // for faster development
       return obs;
     })  // TODO: Upstream bug? using []()::perfetto::protos::Trace&) causes a compilation error.
     .map([](const PageCacheFtraceEvent& event) -> Inode {
@@ -321,7 +394,12 @@ auto /*observable<Inode*/ SelectDistinctInodesFromTraces(
 auto/*observable<InodeResult>*/ ResolveInodesToFileNames(rxcpp::observable<Inode> inodes) {
   static auto* system_call = new SystemCallImpl{};
   std::vector<std::string> root_directories;
-  root_directories.push_back("/");
+  root_directories.push_back("/system");
+  root_directories.push_back("/apex");
+  root_directories.push_back("/data");
+  root_directories.push_back("/vendor");
+  root_directories.push_back("/product");
+  root_directories.push_back("/metadata");
   inode2filename::SearchMode search_mode{inode2filename::SearchMode::kInProcessDirect};
   // TODO: above parameters should be injectable.
 
@@ -338,13 +416,11 @@ auto /*just observable<InodeMap>*/ ReduceResolvedInodesToMap(
     InodeMap{},
     [](InodeMap m, InodeResult result) {
       if (result) {
+        LOG(VERBOSE) << "compiler::ReduceResolvedInodesToMap insert " << result;
         m.insert({std::move(result.inode), std::move(result.data.value())});
       } else {
         // TODO: side stats for how many of these are failed to resolve?
-        int save_errno = errno;
-        errno = result.data.error();
-        PLOG(WARNING) << "compiler: Failed to resolve filename for inode " << result.inode;
-        errno = save_errno;
+        LOG(WARNING) << "compiler: Failed to resolve inode, " << result;
       }
       return m;
     },
@@ -367,8 +443,72 @@ std::ostream& operator<<(std::ostream& os, const ResolvedPageCacheFtraceEvent& e
   return os;
 }
 
+struct CombinedState {
+  CombinedState() = default;
+  explicit CombinedState(InodeMap inode_map) : inode_map{std::move(inode_map)} {}
+  explicit CombinedState(PageCacheFtraceEvent event) : ftrace_event{std::move(event)} {}
+
+  CombinedState(InodeMap inode_map, PageCacheFtraceEvent event)
+    : inode_map(std::move(inode_map)),
+      ftrace_event{std::move(event)} {}
+
+  std::optional<InodeMap> inode_map;
+  std::optional<PageCacheFtraceEvent> ftrace_event;
+
+  bool HasAll() const {
+    return inode_map.has_value() && ftrace_event.has_value();
+  }
+
+  const InodeMap& GetInodeMap() const {
+    DCHECK(HasAll());
+    return inode_map.value();
+  }
+
+  InodeMap& GetInodeMap() {
+    DCHECK(HasAll());
+    return inode_map.value();
+  }
+
+  const PageCacheFtraceEvent& GetEvent() const {
+    DCHECK(HasAll());
+    return ftrace_event.value();
+  }
+
+  PageCacheFtraceEvent& GetEvent() {
+    DCHECK(HasAll());
+    return ftrace_event.value();
+  }
+
+  void Merge(CombinedState&& other) {
+    if (other.inode_map) {
+      inode_map = std::move(other.inode_map);
+    }
+    if (other.ftrace_event) {
+      ftrace_event = std::move(other.ftrace_event);
+    }
+  }
+};
+
+std::ostream& operator<<(std::ostream& os, const CombinedState& s) {
+  os << "CombinedState{inode_map:";
+  if (s.inode_map) {
+    os << "|sz=" << (s.inode_map.value().size()) << "|";
+  } else {
+    os << "(null)";
+  }
+  os << ",event:";
+  if (s.ftrace_event) {
+    //os << s.ftrace_event.value().timestamp << "ns";
+    os << s.ftrace_event.value();
+  } else {
+    os << "(null)";
+  }
+  os << "}";
+  return os;
+}
+
 auto/*observable<ResolvedPageCacheFtraceEvent>*/ ResolvePageCacheEntriesFromProtos(
-    rxcpp::observable<::perfetto::protos::Trace> traces) {
+    rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> traces) {
 
   // 1st chain = emits exactly 1 InodeMap.
 
@@ -377,41 +517,67 @@ auto/*observable<ResolvedPageCacheFtraceEvent>*/ ResolvePageCacheEntriesFromProt
   rxcpp::observable<Inode> distinct_inodes_obs = distinct_inodes.as_dynamic();
   // [inode, inode, inode, ...] -> [(inode, {filename|error}), ...]
   auto/*observable<InodeResult>*/ inode_names = ResolveInodesToFileNames(distinct_inodes_obs);
-  // rxcpp has no 'join' operators, so do a manual join with combine_latest.
-  auto/*observable<InodeMap>*/ inode_name_map = ReduceResolvedInodesToMap(inode_names);/*
-    .map([](const InodeMap& inode_map) -> const InodeMap& inode_map {
-      return inode_map;
-    });*/
+  // rxcpp has no 'join' operators, so do a manual join with concat.
+  auto/*observable<InodeMap>*/ inode_name_map = ReduceResolvedInodesToMap(inode_names);
 
   // 2nd chain = emits all PageCacheFtraceEvent
   auto/*observable<PageCacheFtraceEvent>*/ page_cache_ftrace_events = traces
-    .flat_map([](::perfetto::protos::Trace trace) {  // TODO: avoid copy.
-      rxcpp::observable<PageCacheFtraceEvent> obs = SelectPageCacheFtraceEvents(trace);
+    .flat_map([](ProtobufPtr<::perfetto::protos::Trace> trace) {
+      rxcpp::observable<PageCacheFtraceEvent> obs = SelectPageCacheFtraceEvents(std::move(trace));
       return obs;
+    });
+
+  auto inode_name_map_precombine = inode_name_map
+    .map([](InodeMap inode_map) {
+      LOG(VERBOSE) << "compiler::ResolvePageCacheEntriesFromProtos#inode_name_map_precombine ";
+      return CombinedState{std::move(inode_map)};
+    });
+
+  auto page_cache_ftrace_events_precombine = page_cache_ftrace_events
+    .map([](PageCacheFtraceEvent event) {
+      LOG(VERBOSE)
+          << "compiler::ResolvePageCacheEntriesFromProtos#page_cache_ftrace_events_precombine "
+          << event;
+      return CombinedState{std::move(event)};
     });
 
   // Combine 1st+2nd chain.
   //
-  // combine_latest blocks upstream observables until there's exactly 1 value emitted on all
-  // upstream observables. Each successive on_next from any upstream emits a new tuple.
+  // concat subscribes to each observable, waiting until its completed, before subscribing
+  // to the next observable and waiting again.
+  //
+  // During all this, every #on_next is immediately forwarded to the downstream observables.
   // In our case, we want to block until InodeNameMap is ready, and re-iterate all ftrace events.
+  auto/*observable<ResolvedPageCacheFtraceEvent>*/ resolved_events = inode_name_map_precombine
+    .concat(page_cache_ftrace_events_precombine)
+    .scan(CombinedState{},
+          [](CombinedState current_state, CombinedState delta_state) {
+            LOG(VERBOSE) << "compiler::ResolvePageCacheEntriesFromProtos#scan "
+                          << "current=" << current_state << ","
+                          << "delta=" << delta_state;
+            // IT0    = (,)               + (InodeMap,)
+            // IT1    = (InodeMap,)       + (,Event)
+            // IT2..N = (InodeMap,Event1) + (,Event2)
+            current_state.Merge(std::move(delta_state));
+            return current_state;
+          })
+    .filter([](const CombinedState& state) {
+      return state.HasAll();
+    })
+    .map([](CombinedState& state) -> std::optional<ResolvedPageCacheFtraceEvent> {
+      PageCacheFtraceEvent& event = state.GetEvent();
+      const InodeMap& inode_map = state.GetInodeMap();
 
-  // combine_latest will subscribe to 'traces' again, and combine with the InodeMap this time.
-  //  -- There's only 1 InodeMap, so we always reuse the same value here.
-  auto/*observable<ResolvedPageCacheFtraceEvent>*/ resolved_events = page_cache_ftrace_events
-    .combine_latest(
-      [](PageCacheFtraceEvent event, const InodeMap& inode_map)
-          -> std::optional<ResolvedPageCacheFtraceEvent> {
-        auto it = inode_map.find(event.inode());
-        if (it != inode_map.end()) {
-          std::string filename = it->second;
-          return ResolvedPageCacheFtraceEvent{std::move(filename), std::move(event)};
-        } else {
-          LOG(ERROR) << "compiler: FtraceEvent's inode did not have resolved filename: " << event;
-          return std::nullopt;
-        }
-      },
-      inode_name_map)                                // same reference for inode_map every on_next.
+      auto it = inode_map.find(event.inode());
+      if (it != inode_map.end()) {
+        std::string filename = it->second;
+        LOG(VERBOSE) << "compiler::ResolvePageCacheEntriesFromProtos combine_latest " << event;
+        return ResolvedPageCacheFtraceEvent{std::move(filename), std::move(event)};
+      } else {
+        LOG(ERROR) << "compiler: FtraceEvent's inode did not have resolved filename: " << event;
+        return std::nullopt;
+      }
+    })
     .filter(
       [](std::optional<ResolvedPageCacheFtraceEvent> maybe_event) {
         return maybe_event.has_value();
@@ -575,11 +741,25 @@ auto/*observable<CompilerPageCacheEvent>*/ CompilePageCacheEvents(
       // The values are now ordered by timestamp (and then the rest of the fields).
       CompilerPageCacheEventSet ts_set;
       ts_set.merge(std::move(set));
-      return ts_set;
+
+
+      std::shared_ptr<CompilerPageCacheEventSet> final_set{
+          new CompilerPageCacheEventSet{std::move(ts_set)}};
+      return final_set;
+      // return ts_set;
     })  // observable<CompilerPageCacheEventSet> (just)
   .flat_map(
-    [](CompilerPageCacheEventSet ts_set) {
-      return rxcpp::sources::iterate(std::move(ts_set));
+    [](std::shared_ptr<CompilerPageCacheEventSet> final_set) {
+      // TODO: flat_map seems to make a copy of the parameter _every single iteration_
+      // without the shared_ptr it would just make a copy of the set every time it went
+      // through the iterate function.
+      // Causing absurdly slow compile times x1000 slower than we wanted.
+      // TODO: file a bug upstream and/or fix upstream.
+      CompilerPageCacheEventSet& ts_set = *final_set;
+    // [](CompilerPageCacheEventSet& ts_set) {
+      LOG(DEBUG) << "compiler: Merge-pass completed (" << ts_set.size() << " entries).";
+      //return rxcpp::sources::iterate(std::move(ts_set));
+      return rxcpp::sources::iterate(ts_set).map([](CompilerPageCacheEvent e) { return e; });
     }
   );    // observable<CompilerPageCacheEvent>
 }
@@ -592,9 +772,33 @@ bool PerformCompilation(std::vector<std::string> input_file_names, std::string o
   // TODO: write to a file, instead of to stdout.
   (void)output_file_name;
 
-  compiled_events.subscribe([](CompilerPageCacheEvent event) {
-    LOG(INFO) << "CompilerPageCacheEvent" << event << std::endl;
-  });
+  std::ofstream ofs;
+  if (!output_file_name.empty()) {
+    ofs.open(output_file_name);
+
+    if (!ofs) {
+      LOG(ERROR) << "compiler: Failed to open output file for writing: " << output_file_name;
+      return false;
+    }
+  }
+
+  static bool constexpr kOutputResults = true;
+
+  int counter = 0;
+  compiled_events
+    // .as_blocking()
+    .subscribe([&](CompilerPageCacheEvent event) {
+      if (kOutputResults) {
+        if (output_file_name.empty()) {
+          LOG(INFO) << "CompilerPageCacheEvent" << event << std::endl;
+        } else {
+          ofs << event << "\n";  // TODO: write in proto format instead.
+        }
+      }
+      ++counter;
+    });
+
+  LOG(DEBUG) << "compiler: Compilation completed (" << counter << " events).";
 
   return true;
 }

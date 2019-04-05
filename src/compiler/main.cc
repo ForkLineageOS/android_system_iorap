@@ -82,6 +82,8 @@ int Main(int argc, char** argv) {
 
     LOG(VERBOSE) << "Verbose check";
     LOG(VERBOSE) << "Debug check: " << ::iorap::kIsDebugBuild;
+  } else {
+    android::base::SetMinimumLogSeverity(android::base::DEBUG);
   }
 
   // Useful to attach a debugger...

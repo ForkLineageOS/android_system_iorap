@@ -51,6 +51,32 @@ struct PerfettoDependencies {
                                                       uint32_t buffer_size = 4096);
 };
 
+namespace detail {
+  template <typename T>
+  struct concept_message_lite_base {
+    static_assert(std::is_base_of_v<::google::protobuf::MessageLite, T>,
+                  "T must inherit from MessageLite");
+    using type = T;
+  };
+
+  template <typename T>
+  using concept_message_lite_base_t = typename concept_message_lite_base<T>::type;
+}  // namespace detail
+
+/*
+ * In Android's version of libprotobuf, move-constructors are not generated.
+ * This results in a legitimate (~10sec per TracePacket being compiled) slowdown,
+ * so we need to avoid it everywhere.
+ *
+ * 1) Don't copy the protos, move them instead.
+ * 2) Use 'shared_ptr' because rxcpp won't compile with unique_ptr.
+ */
+template <typename T>
+using ProtobufPtr = std::shared_ptr<detail::concept_message_lite_base_t<const T>>;
+
+template <typename T>
+using ProtobufMutablePtr = std::shared_ptr<detail::concept_message_lite_base_t<T>>;
+
 // This acts as a lightweight type marker so that we know what data has actually
 // encoded under the hood.
 template <typename T>
@@ -84,13 +110,18 @@ struct BinaryWireProtobuf {
   explicit BinaryWireProtobuf(std::vector<std::byte> data) : data_{std::move(data)} {
   }
 
+  // You wouldn't want to accidentally copy a giant multi-megabyte chunk would you?
+  // BinaryWireProtobuf(const BinaryWireProtobuf& other) = delete;  // FIXME: rx likes to copy.
+  BinaryWireProtobuf(const BinaryWireProtobuf& other) = default;
+  BinaryWireProtobuf(BinaryWireProtobuf&& other) = default;
+
   // Important: Deserialization could fail, for example data is truncated or
   // some minor disc corruption occurred.
   template <typename U>
-  std::optional<U> MaybeUnserialize() {
-    U unencoded;
+  std::optional<ProtobufPtr<U>> MaybeUnserialize() {
+    ProtobufMutablePtr<U> unencoded{new U{}};
 
-    if (!unencoded.ParseFromArray(data_.data(), data_.size())) {
+    if (!unencoded->ParseFromArray(data_.data(), data_.size())) {
       return std::nullopt;
     }
 
