@@ -29,6 +29,9 @@ FN_BEGIN(::com::google::android::startup::iorap::,IIorap)                       
 FN(setTaskListener, (const ::android::sp<::com::google::android::startop::iorap::,ITaskListener,>&,listener)) /*NOLINT*/ \
 FN(onAppLaunchEvent,(const ::com::google::android::startop::iorap::,RequestId,&,request),          \
                     (const ::com::google::android::startop::iorap::,AppLaunchEvent,&,event))       \
+FN(onJobScheduledEvent,                                                                            \
+                    (const ::com::google::android::startop::iorap::,RequestId,&,request),          \
+                    (const ::com::google::android::startop::iorap::,JobScheduledEvent,&,event))    \
 FN(onPackageEvent,  (const ::com::google::android::startop::iorap::,RequestId,&,request),          \
                     (const ::com::google::android::startop::iorap::,PackageEvent,&,event))         \
 FN(onAppIntentEvent,(const ::com::google::android::startop::iorap::,RequestId,&,request),          \
