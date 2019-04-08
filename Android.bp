@@ -376,3 +376,34 @@ cc_binary {
   static_libs: [
   ],
 }
+
+// Static libraries cannot export their dependencies,
+// the current convention is to use an extra 'defaults' rule for statics
+// to bring in all the dependencies.
+cc_defaults {
+    name: "libiorap-serialize-default-dependencies",
+
+    defaults: [
+    ],
+
+    include_dirs: [],
+    static_libs: [
+    ],
+    shared_libs: [
+    ]
+    // Above intentionally left empty.
+}
+
+cc_library_static {
+    name: "libiorap-serialize",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+        "libiorap-serialize-default-dependencies",
+    ],
+
+    srcs: [
+        "src/serialize/**/*.cc",
+        "src/serialize/**/*.proto",
+    ],
+}
