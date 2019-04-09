@@ -78,6 +78,9 @@ struct BinaryWireProtobuf {
               data_.data());
   }
 
+  explicit BinaryWireProtobuf(std::vector<std::byte> data) : data_{std::move(data)} {
+  }
+
   // Important: Deserialization could fail, for example data is truncated or
   // some minor disc corruption occurred.
   template <typename U>
@@ -94,9 +97,14 @@ struct BinaryWireProtobuf {
   bool WriteFullyToFile(const std::string& path,
                         bool follow_symlinks = false) const;
 
+  static std::optional<BinaryWireProtobuf<T>> ReadFullyFromFile(const std::string& path,
+                                                                bool follow_symlinks = false);
+
  private:
   static bool CleanUpAfterFailedWrite(const std::string& path);
   bool WriteStringToFd(int fd) const;
+
+  static bool ReadFdToString(int fd, /*out*/std::vector<std::byte>* data);
 
   std::vector<std::byte> data_;
 };

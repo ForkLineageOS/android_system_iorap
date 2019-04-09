@@ -100,7 +100,7 @@ struct SearchDirectories {
   rxcpp::observable<InodeResult>
       FindFilenamesFromInodes(std::vector<std::string> root_directories,
                               std::vector<Inode> inode_list,
-                              SearchMode mode);
+                              SearchMode mode) const;
 
   // Create a cold observable of inode results (a lazy stream) corresponding
   // to the inode search list.
@@ -126,7 +126,18 @@ struct SearchDirectories {
   std::pair<rxcpp::observable<InodeResult>, std::unique_ptr<RxAnyConnectable>>
       FindFilenamesFromInodesPair(std::vector<std::string> root_directories,
                                   std::vector<Inode> inode_list,
-                                  SearchMode mode);
+                                  SearchMode mode) const;
+
+  // No items on the output stream will be emitted until 'inodes' completes.
+  //
+  // The current algorithm is a naive DFS, so if it began too early it would either
+  // miss the search items or require traversal restarts.
+  //
+  // See above for more details.
+  rxcpp::observable<InodeResult>
+      FindFilenamesFromInodes(std::vector<std::string> root_directories,
+                              rxcpp::observable<Inode> inodes,
+                              SearchMode mode) const;
 
   // Any borrowed parameters here can also be borrowed by the observables returned by the above
   // member functions.

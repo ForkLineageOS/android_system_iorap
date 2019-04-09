@@ -781,8 +781,8 @@ auto/*[observable<InodeResult>, connectable]*/ SearchDirectoriesForMatchingInode
       // This means that for cond to go to false, we would've read one extra item and then discarded
       // it. If that item was the first child of a directory, that means we essentially did
       // one redundant pass of doing a readdir.
-      //
       // In other words if the search set goes to empty while the current item is a directory,
+      //
       // it will definitely readdir on it at least once as we try to get the first child in
       // OnTreeTraversal.
       //
@@ -848,11 +848,10 @@ auto/*[observable<InodeResult>, connectable]*/ SearchDirectoriesForMatchingInode
   return std::make_pair(all_inode_results, search_state_results);
 }
 
-
 rxcpp::observable<InodeResult> SearchDirectories::FindFilenamesFromInodes(
     std::vector<std::string> root_directories,
     std::vector<Inode> inode_list,
-    SearchMode mode) {
+    SearchMode mode) const {
   DCHECK(mode == SearchMode::kInProcessDirect) << " other modes not implemented yet";
 
   auto/*observable[2]*/ [inode_results, connectable] = SearchDirectoriesForMatchingInodes(
@@ -860,7 +859,7 @@ rxcpp::observable<InodeResult> SearchDirectories::FindFilenamesFromInodes(
       std::move(inode_list),
       system_call_);
 
-  return inode_results;
+  return inode_results.ref_count(connectable);
 }
 
 // I think we could avoid this with auto_connect, which rxcpp doesn't seem to have.
@@ -898,7 +897,7 @@ std::pair<rxcpp::observable<InodeResult>, std::unique_ptr<SearchDirectories::RxA
     SearchDirectories::FindFilenamesFromInodesPair(
         std::vector<std::string> root_directories,
         std::vector<Inode> inode_list,
-        SearchMode mode) {
+        SearchMode mode) const {
   DCHECK(mode == SearchMode::kInProcessDirect) << " other modes not implemented yet";
 
   auto/*observable[2]*/ [inode_results, connectable] = SearchDirectoriesForMatchingInodes(
@@ -912,4 +911,26 @@ std::pair<rxcpp::observable<InodeResult>, std::unique_ptr<SearchDirectories::RxA
   return {inode_results, std::move(connectable_ptr)};
 }
 
+rxcpp::observable<InodeResult>
+    SearchDirectories::FindFilenamesFromInodes(std::vector<std::string> root_directories,
+                                               rxcpp::observable<Inode> inodes,
+                                               SearchMode mode) const {
+
+  // It's inefficient to search for inodes until the full search list is available,
+  // so first reduce to a vector so we can access all the inodes simultaneously.
+  return inodes.reduce(std::vector<Inode>{},
+                       [](std::vector<Inode> vec, Inode inode) {
+                         vec.push_back(inode);
+                         return vec;
+                       },
+                       [](std::vector<Inode> v){
+                         return v;  // TODO: use an identity function
+                       })
+    .flat_map([root_directories=std::move(root_directories), mode, self=*this]
+          (std::vector<Inode> vec) {
+      // All borrowed values (e.g. SystemCall) must outlive the observable.
+      return self.FindFilenamesFromInodes(root_directories, vec, mode);
+    }
+  );
+}
 }  // namespace iorap::inode2filename

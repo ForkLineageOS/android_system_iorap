@@ -567,6 +567,51 @@ bool BinaryWireProtobuf<T>::WriteStringToFd(int fd) const {
   return true;
 }
 
+template <typename T>
+std::optional<BinaryWireProtobuf<T>> BinaryWireProtobuf<T>::ReadFullyFromFile(
+    const std::string& path,
+    bool follow_symlinks) {
+  std::vector<std::byte> data;
+
+  int flags = O_RDONLY | O_CLOEXEC | O_BINARY | (follow_symlinks ? 0 : O_NOFOLLOW);
+  android::base::unique_fd fd(TEMP_FAILURE_RETRY(open(path.c_str(), flags)));
+  if (fd == -1) {
+    return std::nullopt;
+  }
+
+  if (ReadFdToString(fd.get(), /*out*/&data)) {
+    return BinaryWireProtobuf<T>{std::move(data)};
+  } else {
+    return std::nullopt;
+  }
+}
+
+template <typename T>
+bool BinaryWireProtobuf<T>::ReadFdToString(int fd, /*out*/std::vector<std::byte>* content) {
+  DCHECK(content != nullptr);
+
+  content->clear();
+
+  struct stat sb;
+  if (fstat(fd, /*out*/&sb) != -1 && sb.st_size > 0) {
+    content->reserve(sb.st_size);
+  }
+
+  char buf[BUFSIZ];
+  auto it = content->begin();
+  ssize_t n;
+  while ((n = TEMP_FAILURE_RETRY(read(fd, &buf[0], sizeof(buf)))) > 0) {
+    content->insert(it,
+                    reinterpret_cast<std::byte*>(&buf[0]),
+                    reinterpret_cast<std::byte*>(&buf[n]));
+
+    std::advance(/*inout*/it, static_cast<size_t>(n));
+
+    static_assert(sizeof(char) == sizeof(std::byte), "sanity check for reinterpret cast");
+  }
+  return (n == 0) ? true : false;
+}
+
 // explicit template instantiation.
 template struct BinaryWireProtobuf<::google::protobuf::MessageLite>;
 // TODO: refactor this not to need the template instantiation.
