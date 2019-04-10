@@ -15,10 +15,12 @@
 #ifndef SERIALIZE_PROTOBUF_IO_H_
 #define SERIALIZE_PROTOBUF_IO_H_
 
+#include "common/expected.h"
 #include "serialize/arena_ptr.h"
 #include "system/iorap/src/serialize/TraceFile.pb.h"
 
 #include <string>
+#include <string_view>
 
 namespace iorap {
 namespace serialize {
@@ -37,6 +39,20 @@ class ProtobufIO {
   static ArenaPtr<proto::TraceFile> Open(std::string file_path);
   // Open the protobuf from the file descriptor. Returns null on failure.
   static ArenaPtr<proto::TraceFile> Open(int fd, const char* file_path = "<unknown>");
+
+  // Save the protobuf by overwriting the file at file_path.
+  // The file state is indeterminate at failure.
+  // Returns # of bytes written out on success, otherwise the errno value.
+  static iorap::expected<size_t /*bytes written*/, int /*errno*/> WriteFully(
+      const ::google::protobuf::MessageLite& message,
+      std::string_view file_path);
+  // Save the protobuf by truncating the file already open at 'fd'.
+  // The file state is indeterminate at failure.
+  // Returns # of bytes written out on success, otherwise the errno value.
+  static iorap::expected<size_t /*bytes written*/, int /*errno*/> WriteFully(
+      const ::google::protobuf::MessageLite& message,
+      int fd,
+      std::string_view file_path = "<unknown>");
 
   ProtobufIO() = delete;
 };

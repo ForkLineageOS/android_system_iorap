@@ -28,7 +28,9 @@ namespace iorap::compiler {
 // determines success/failure.
 //
 // Operation is transactional -- that is if there is a failure, `output_file_name` is untouched.
-bool PerformCompilation(std::vector<std::string> input_file_names, std::string output_file_name);
+bool PerformCompilation(std::vector<std::string> input_file_names,
+                        std::string output_file_name,
+                        bool output_proto = true);
 }
 
 #endif  // IORAP_SRC_COMPILER_COMPILER_H_
