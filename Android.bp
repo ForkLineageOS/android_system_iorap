@@ -411,3 +411,35 @@ cc_library_static {
         "src/serialize/**/*.cc",
     ],
 }
+
+
+// Static libraries cannot export their dependencies,
+// the current convention is to use an extra 'defaults' rule for statics
+// to bring in all the dependencies.
+cc_defaults {
+    name: "libiorap-prefetcher-default-dependencies",
+
+    defaults: [
+    ],
+
+    include_dirs: [],
+    static_libs: [
+        "libiorap-serialize",
+    ],
+    shared_libs: [
+    ],
+}
+
+cc_library_static {
+    name: "libiorap-prefetcher",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+        "libiorap-prefetcher-default-dependencies",
+        "libiorap-serialize-default-dependencies",
+    ],
+
+    srcs: [
+        "src/prefetcher/**/*.cc",
+    ],
+}
