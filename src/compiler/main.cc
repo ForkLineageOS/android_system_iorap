@@ -14,11 +14,13 @@
 
 #include "common/debug.h"
 #include "compiler/compiler.h"
+#include "inode2filename/inode_resolver.h"
 
 #include <android-base/parseint.h>
 #include <android-base/logging.h>
 
 #include <iostream>
+#include <optional>
 
 #if defined(IORAP_COMPILER_MAIN)
 
@@ -28,11 +30,13 @@ void Usage(char** argv) {
   std::cerr << "Usage: " << argv[0] << " [--output-proto=output.pb] input1.pb [input2.pb ...]" << std::endl;
   std::cerr << "" << std::endl;
   std::cerr << "  Request a compilation of multiple inputs (format: PerfettoTraceProto)." << std::endl;
-  std::cerr << "  The result is a CompiledTraceProto, representing a merged compiled trace with inodes resolved." << std::endl;
+  std::cerr << "  The result is a TraceFile, representing a merged compiled trace with inodes resolved." << std::endl;
   std::cerr << "" << std::endl;
   std::cerr << "  Optional flags:" << std::endl;
   std::cerr << "    --help,-h                  Print this Usage." << std::endl;
-  std::cerr << "    --output-proto $,-op $     CompiledTraceBuffer tracebuffer output file (default stdout)." << std::endl;
+  std::cerr << "    --output-text,-ot          Output ascii text instead of protobuf (default off)." << std::endl;
+  std::cerr << "    --output-proto $,-op $     TraceFile tracebuffer output file (default stdout)." << std::endl;
+  std::cerr << "    --inode-textcache $,-it $  Resolve inode->filename from textcache (disables diskscan)." << std::endl;
   std::cerr << "    --verbose,-v               Set verbosity (default off)." << std::endl;
   std::cerr << "    --wait,-w                  Wait for key stroke before continuing (default off)." << std::endl;
   exit(1);
@@ -46,6 +50,8 @@ int Main(int argc, char** argv) {
   bool enable_verbose = false;
 
   std::string arg_output_proto;
+  bool arg_output_text = false;
+  std::optional<std::string> arg_inode_textcache;
 
   if (argc == 1) {
     // Need at least 1 input file to do anything.
@@ -67,6 +73,15 @@ int Main(int argc, char** argv) {
         return 1;
       }
       arg_output_proto = arg_next;
+      ++arg;
+    } else if (argstr == "--output-text" || argstr == "-ot") {
+      arg_output_text = true;
+    } else if (argstr == "--inode-textcache" || argstr == "-it") {
+      if (!has_arg_next) {
+        std::cerr << "Missing --inode-textcache <value>" << std::endl;
+        return 1;
+      }
+      arg_inode_textcache = arg_next;
       ++arg;
     } else if (argstr == "--verbose" || argstr == "-v") {
       enable_verbose = true;
@@ -95,8 +110,39 @@ int Main(int argc, char** argv) {
     std::cin >> wait_for_keystroke;
   }
 
+  auto system_call = std::make_unique<SystemCallImpl>();
+
+  using namespace inode2filename;
+
+  InodeResolverDependencies ir_dependencies;
+  // Passed from command-line.
+  if (arg_inode_textcache) {
+    ir_dependencies.data_source = DataSourceKind::kTextCache;
+    ir_dependencies.text_cache_filename = arg_inode_textcache;
+    ir_dependencies.verify = VerifyKind::kNone;  // required for determinism.
+  } else {
+    ir_dependencies.data_source = DataSourceKind::kDiskScan;
+    LOG(WARNING) << "--inode-textcache unspecified. "
+                 << "Inodes will be resolved by scanning the disk, which makes compilation "
+                 << "non-deterministic.";
+  }
+  // TODO: add command line.
+  ir_dependencies.root_directories.push_back("/system");
+  ir_dependencies.root_directories.push_back("/apex");
+  ir_dependencies.root_directories.push_back("/data");
+  ir_dependencies.root_directories.push_back("/vendor");
+  ir_dependencies.root_directories.push_back("/product");
+  ir_dependencies.root_directories.push_back("/metadata");
+  // Hardcoded.
+  ir_dependencies.process_mode = ProcessMode::kInProcessDirect;  // TODO: others.
+  ir_dependencies.system_call = /*borrowed*/system_call.get();
+
   int return_code = 0;
-  return_code = !PerformCompilation(std::move(arg_input_filenames), std::move(arg_output_proto));
+  return_code =
+      !PerformCompilation(std::move(arg_input_filenames),
+                          std::move(arg_output_proto),
+                          !arg_output_text,
+                          std::move(ir_dependencies));
 
   // Uncomment this if we want to leave the process around to inspect it from adb shell.
   // sleep(100000);

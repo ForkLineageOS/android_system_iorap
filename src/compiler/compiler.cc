@@ -399,22 +399,12 @@ auto /*observable<Inode*/ SelectDistinctInodesFromTraces(
 }
 // TODO: static assert checks for convertible return values.
 
-auto/*observable<InodeResult>*/ ResolveInodesToFileNames(rxcpp::observable<Inode> inodes) {
-  static auto* system_call = new SystemCallImpl{};
-  std::vector<std::string> root_directories;
-  root_directories.push_back("/system");
-  root_directories.push_back("/apex");
-  root_directories.push_back("/data");
-  root_directories.push_back("/vendor");
-  root_directories.push_back("/product");
-  root_directories.push_back("/metadata");
-  inode2filename::SearchMode search_mode{inode2filename::SearchMode::kInProcessDirect};
-  // TODO: above parameters should be injectable.
-
-  SearchDirectories search{borrowed<SystemCall*>(system_call)};
-  return search.FindFilenamesFromInodes(std::move(root_directories),
-                                        std::move(inodes),
-                                        search_mode);
+auto/*observable<InodeResult>*/ ResolveInodesToFileNames(
+    rxcpp::observable<Inode> inodes,
+    inode2filename::InodeResolverDependencies dependencies) {
+  std::shared_ptr<inode2filename::InodeResolver> inode_resolver =
+      inode2filename::InodeResolver::Create(std::move(dependencies));
+  return inode_resolver->FindFilenamesFromInodes(std::move(inodes));
 }
 
 using InodeMap = std::unordered_map<Inode, std::string /*filename*/>;
@@ -516,7 +506,8 @@ std::ostream& operator<<(std::ostream& os, const CombinedState& s) {
 }
 
 auto/*observable<ResolvedPageCacheFtraceEvent>*/ ResolvePageCacheEntriesFromProtos(
-    rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> traces) {
+    rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> traces,
+    inode2filename::InodeResolverDependencies dependencies) {
 
   // 1st chain = emits exactly 1 InodeMap.
 
@@ -524,7 +515,8 @@ auto/*observable<ResolvedPageCacheFtraceEvent>*/ ResolvePageCacheEntriesFromProt
   auto/*observable<Inode>*/ distinct_inodes = SelectDistinctInodesFromTraces(traces);
   rxcpp::observable<Inode> distinct_inodes_obs = distinct_inodes.as_dynamic();
   // [inode, inode, inode, ...] -> [(inode, {filename|error}), ...]
-  auto/*observable<InodeResult>*/ inode_names = ResolveInodesToFileNames(distinct_inodes_obs);
+  auto/*observable<InodeResult>*/ inode_names = ResolveInodesToFileNames(distinct_inodes_obs,
+                                                                         std::move(dependencies));
   // rxcpp has no 'join' operators, so do a manual join with concat.
   auto/*observable<InodeMap>*/ inode_name_map = ReduceResolvedInodesToMap(inode_names);
 
@@ -774,9 +766,11 @@ auto/*observable<CompilerPageCacheEvent>*/ CompilePageCacheEvents(
 
 bool PerformCompilation(std::vector<std::string> input_file_names,
                         std::string output_file_name,
-                        bool output_proto) {
+                        bool output_proto,
+                        inode2filename::InodeResolverDependencies dependencies) {
   auto trace_protos = ReadPerfettoTraceProtos(std::move(input_file_names));
-  auto resolved_events = ResolvePageCacheEntriesFromProtos(std::move(trace_protos));
+  auto resolved_events = ResolvePageCacheEntriesFromProtos(std::move(trace_protos),
+                                                           std::move(dependencies));
   auto compiled_events = CompilePageCacheEvents(std::move(resolved_events));
 
   std::ofstream ofs;

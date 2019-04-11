@@ -54,7 +54,7 @@ struct InodeResolverDependencies : public DataSourceDependencies {
 
 // Create an rx-observable chain that allows searching for inode->filename mappings given
 // a set of inode keys.
-class InodeResolver : std::enable_shared_from_this<InodeResolver> {
+class InodeResolver : public std::enable_shared_from_this<InodeResolver> {
  public:
   static std::shared_ptr<InodeResolver> Create(InodeResolverDependencies dependencies,
                                                std::shared_ptr<DataSource> data_source);  // nonnull

@@ -15,6 +15,8 @@
 #ifndef IORAP_SRC_COMPILER_COMPILER_H_
 #define IORAP_SRC_COMPILER_COMPILER_H_
 
+#include "inode2filename/inode_resolver.h"
+
 #include <string>
 #include <vector>
 
@@ -30,7 +32,8 @@ namespace iorap::compiler {
 // Operation is transactional -- that is if there is a failure, `output_file_name` is untouched.
 bool PerformCompilation(std::vector<std::string> input_file_names,
                         std::string output_file_name,
-                        bool output_proto = true);
+                        bool output_proto,
+                        inode2filename::InodeResolverDependencies dependencies);
 }
 
 #endif  // IORAP_SRC_COMPILER_COMPILER_H_
