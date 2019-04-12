@@ -18,6 +18,8 @@
 #include "common/expected.h"
 #include "manager/event_manager.h"
 #include "perfetto/rx_producer.h"
+#include "prefetcher/read_ahead.h"
+#include "prefetcher/task_id.h"
 
 #include <android-base/properties.h>
 #include <rxcpp/rx.hpp>
@@ -115,7 +117,15 @@ std::ostream& operator<<(std::ostream& os, const AppComponentName& name) {
 // of #scan to another.
 struct AppLaunchEventState {
   std::optional<AppComponentName> component_name_;
+  // Sequence ID is shared amongst the same app launch sequence,
+  // but changes whenever a new app launch sequence begins.
+  size_t sequence_id_ = static_cast<size_t>(-1);
 
+  prefetcher::ReadAhead read_ahead_;
+  bool is_read_ahead_{false};
+  std::optional<prefetcher::TaskId> read_ahead_task_;
+
+  bool allowed_tracing_{true};
   bool is_tracing_{false};
   std::optional<rxcpp::composite_subscription> rx_lifetime_;
   std::vector<rxcpp::composite_subscription> rx_in_flight_;
@@ -125,10 +135,13 @@ struct AppLaunchEventState {
   borrowed<observe_on_one_worker*> io_thread_;  // not null
 
   explicit AppLaunchEventState(borrowed<perfetto::RxProducerFactory*> perfetto_factory,
+                               bool allowed_tracing,
                                borrowed<observe_on_one_worker*> thread,
                                borrowed<observe_on_one_worker*> io_thread) {
     perfetto_factory_ = perfetto_factory;
     DCHECK(perfetto_factory_ != nullptr);
+
+    allowed_tracing_ = allowed_tracing;
 
     thread_ = thread;
     DCHECK(thread_ != nullptr);
@@ -146,6 +159,9 @@ struct AppLaunchEventState {
 
     using Type = AppLaunchEvent::Type;
 
+    DCHECK_GE(event.sequence_id, 0);
+    sequence_id_ = static_cast<size_t>(event.sequence_id);
+
     switch (event.type) {
       case Type::kIntentStarted: {
         DCHECK(!IsTracing());
@@ -161,12 +177,19 @@ struct AppLaunchEventState {
         AppComponentName component_name{package_name, class_name};
 
         component_name_ = component_name;
-        rx_lifetime_ = StartTracing(std::move(component_name));
+
+        StartReadAhead(sequence_id_, component_name);
+        if (allowed_tracing_) {
+          rx_lifetime_ = StartTracing(std::move(component_name));
+        }
 
         break;
       }
       case Type::kIntentFailed:
-        AbortTrace();
+        if (allowed_tracing_) {
+            AbortTrace();
+        }
+        AbortReadAhead();
         break;
       case Type::kActivityLaunched: {
         // Cancel tracing for warm/hot.
@@ -175,8 +198,12 @@ struct AppLaunchEventState {
         AppLaunchEvent::Temperature temperature = event.temperature;
         if (temperature != AppLaunchEvent::Temperature::kCold) {
           LOG(DEBUG) << "AppLaunchEventState#OnNewEvent aborting trace due to non-cold temperature";
-          AbortTrace();
-        } else if (!IsTracing()) {  // and the temperature is Cold.
+
+          if (allowed_tracing_) {
+            AbortTrace();
+          }
+          AbortReadAhead();
+        } else if (!IsTracing() || !IsReadAhead()) {  // and the temperature is Cold.
           // Start late trace when intent didn't have a component name
           LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent need to start new trace";
 
@@ -191,12 +218,19 @@ struct AppLaunchEventState {
           AppComponentName component_name = AppComponentName::FromString(title);
 
           component_name_ = component_name;
-          rx_lifetime_ = StartTracing(std::move(component_name));
+
+          StartReadAhead(sequence_id_, component_name);
+          if (allowed_tracing_ && !IsTracing()) {
+            rx_lifetime_ = StartTracing(std::move(component_name));
+          }
         } else {
           // FIXME: match actual component name against intent component name.
           // abort traces if they don't match.
 
-          LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent already tracing";
+          if (allowed_tracing_) {
+            LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent already tracing";
+          }
+          LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent already doing readahead";
         }
         break;
       }
@@ -208,10 +242,16 @@ struct AppLaunchEventState {
         if (IsTracing()) {
           MarkPendingTrace();
         }
+        if (IsReadAhead()) {
+          FinishReadAhead();
+        }
         break;
       case Type::kActivityLaunchCancelled:
         // Abort tracing.
-        AbortTrace();
+        if (allowed_tracing_) {
+          AbortTrace();
+        }
+        AbortReadAhead();
         break;
       default:
         DCHECK(false) << "invalid type: " << event;  // binder layer should've rejected this.
@@ -219,11 +259,42 @@ struct AppLaunchEventState {
     }
   }
 
+  // Is there an in-flight readahead task currently?
+  bool IsReadAhead() const {
+    return read_ahead_task_.has_value();
+  }
+
+  void StartReadAhead(size_t id, const AppComponentName& component_name) {
+    DCHECK(!IsReadAhead());
+
+    std::string file_path = "/data/misc/iorapd/";
+    file_path += component_name.ToUrlEncodedString();
+    file_path += ".compiled_trace.pb";
+
+    prefetcher::TaskId task{id, std::move(file_path)};
+    read_ahead_.BeginTask(task);
+    // TODO: non-void return signature?
+
+    read_ahead_task_ = std::move(task);
+  }
+
+  void FinishReadAhead() {
+    DCHECK(IsReadAhead());
+
+    read_ahead_.FinishTask(*read_ahead_task_);
+    read_ahead_task_ = std::nullopt;
+  }
+
+  void AbortReadAhead() {
+    FinishReadAhead();
+  }
+
   bool IsTracing() const {
     return is_tracing_;
   }
 
   rxcpp::composite_subscription StartTracing(AppComponentName component_name) {
+    DCHECK(allowed_tracing_);
     DCHECK(!IsTracing());
 
     auto /*observable<PerfettoStreamCommand>*/ perfetto_commands =
@@ -285,6 +356,8 @@ struct AppLaunchEventState {
 
   void AbortTrace() {
     LOG(VERBOSE) << "AppLaunchEventState - AbortTrace";
+    DCHECK(allowed_tracing_);
+
     is_tracing_ = false;
     if (rx_lifetime_) {
       // TODO: it would be good to call perfetto Destroy.
@@ -297,6 +370,7 @@ struct AppLaunchEventState {
 
   void MarkPendingTrace() {
     LOG(VERBOSE) << "AppLaunchEventState - MarkPendingTrace";
+    DCHECK(allowed_tracing_);
     DCHECK(is_tracing_);
     DCHECK(rx_lifetime_.has_value());
 
@@ -456,12 +530,7 @@ class EventManager::Impl {
     // TODO: read all properties from one config class.
     tracing_allowed_ = ::android::base::GetBoolProperty("iorapd.perfetto.enable", /*default*/false);
 
-    if (tracing_allowed_) {
-      rx_lifetime_ = InitializeRxGraph();
-    } else {
-      LOG(WARNING) << "Tracing disabled by iorapd.perfetto.enable=false";
-    }
-
+    rx_lifetime_ = InitializeRxGraph();
     rx_lifetime_jobs_ = InitializeRxGraphForJobScheduledEvents();
   }
 
@@ -501,7 +570,14 @@ class EventManager::Impl {
 
     rxcpp::composite_subscription lifetime;
 
-    AppLaunchEventState initial_state{&perfetto_factory_, &worker_thread2_, &io_thread_};
+    if (!tracing_allowed_) {
+      LOG(WARNING) << "Tracing disabled by iorapd.perfetto.enable=false";
+    }
+
+    AppLaunchEventState initial_state{&perfetto_factory_,
+                                      tracing_allowed_,
+                                      &worker_thread2_,
+                                      &io_thread_};
     app_launch_events_
       .subscribe_on(worker_thread_)
       .scan(std::move(initial_state),

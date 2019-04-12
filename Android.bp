@@ -123,9 +123,11 @@ cc_defaults {
     name: "libiorap-manager-default-dependencies",
     static_libs: [
         "libiorap-perfetto",
+        "libiorap-prefetcher",
     ],
     defaults: [
         "libiorap-perfetto-default-dependencies",
+        "libiorap-prefetcher-default-dependencies",
     ],
     // Users of 'libiorap-manager' also need to include these defaults to avoid
     // linking errors.

@@ -28,7 +28,11 @@ class ReadAhead {
  public:
   // Process a task *now*. Currently will block until all readaheads have been
   // issued for all entries in that task.
+  //
+  // Any memory mapped or file descriptors opened as a side effect must be
+  // cleaned up with #FinishTask.
   void BeginTask(const TaskId& id);
+  // Complete a task, releasing any memory/file descriptors associated with it.
   void FinishTask(const TaskId& id);
  private:
   bool PerformReadAhead(const ReadAheadFileEntry& entry, size_t length, size_t offset);
