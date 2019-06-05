@@ -23,6 +23,7 @@ filegroup {
         "binder/com/google/android/startop/iorap/IIorap.aidl",
         "binder/com/google/android/startop/iorap/ITaskListener.aidl",
     ],
+    path: "binder",
 }
 
 cc_defaults {
