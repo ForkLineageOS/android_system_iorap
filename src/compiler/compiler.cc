@@ -830,6 +830,7 @@ bool PerformCompilation(std::vector<std::string> input_file_names,
       } else {
         file_handle = it->second;
       }
+      int kPageSize = 4096;  // TODO: don't hardcode the page size.
 
       // Add TraceFileEntry.
       DCHECK(trace_file_proto->mutable_list() != nullptr);
@@ -837,8 +838,9 @@ bool PerformCompilation(std::vector<std::string> input_file_names,
       DCHECK(entry != nullptr);
 
       entry->set_index_id(file_handle);
-      entry->set_file_offset(static_cast<int64_t>(event.index));
-      entry->set_file_length(4096);  // TODO: don't hardcode the page size.
+      // Page index -> file offset in bytes.
+      entry->set_file_offset(static_cast<int64_t>(event.index) * kPageSize);
+      entry->set_file_length(kPageSize);
     })
     .subscribe([&](CompilerPageCacheEvent event) {
       if (!output_proto) {
