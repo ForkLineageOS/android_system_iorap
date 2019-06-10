@@ -122,6 +122,7 @@ struct AppLaunchEventState {
   size_t sequence_id_ = static_cast<size_t>(-1);
 
   prefetcher::ReadAhead read_ahead_;
+  bool allowed_readahead_{true};
   bool is_read_ahead_{false};
   std::optional<prefetcher::TaskId> read_ahead_task_;
 
@@ -135,12 +136,14 @@ struct AppLaunchEventState {
   borrowed<observe_on_one_worker*> io_thread_;  // not null
 
   explicit AppLaunchEventState(borrowed<perfetto::RxProducerFactory*> perfetto_factory,
+                               bool allowed_readahead,
                                bool allowed_tracing,
                                borrowed<observe_on_one_worker*> thread,
                                borrowed<observe_on_one_worker*> io_thread) {
     perfetto_factory_ = perfetto_factory;
     DCHECK(perfetto_factory_ != nullptr);
 
+    allowed_readahead_ = allowed_readahead;
     allowed_tracing_ = allowed_tracing;
 
     thread_ = thread;
@@ -178,7 +181,9 @@ struct AppLaunchEventState {
 
         component_name_ = component_name;
 
-        StartReadAhead(sequence_id_, component_name);
+        if (allowed_readahead_) {
+          StartReadAhead(sequence_id_, component_name);
+        }
         if (allowed_tracing_) {
           rx_lifetime_ = StartTracing(std::move(component_name));
         }
@@ -219,7 +224,9 @@ struct AppLaunchEventState {
 
           component_name_ = component_name;
 
-          StartReadAhead(sequence_id_, component_name);
+          if (allowed_readahead_ && !IsReadAhead()) {
+            StartReadAhead(sequence_id_, component_name);
+          }
           if (allowed_tracing_ && !IsTracing()) {
             rx_lifetime_ = StartTracing(std::move(component_name));
           }
@@ -251,7 +258,9 @@ struct AppLaunchEventState {
         if (allowed_tracing_) {
           AbortTrace();
         }
-        AbortReadAhead();
+        if (IsReadAhead()) {
+          AbortReadAhead();
+        }
         break;
       default:
         DCHECK(false) << "invalid type: " << event;  // binder layer should've rejected this.
@@ -265,6 +274,7 @@ struct AppLaunchEventState {
   }
 
   void StartReadAhead(size_t id, const AppComponentName& component_name) {
+    DCHECK(allowed_readahead_);
     DCHECK(!IsReadAhead());
 
     std::string file_path = "/data/misc/iorapd/";
@@ -529,6 +539,8 @@ class EventManager::Impl {
 
     // TODO: read all properties from one config class.
     tracing_allowed_ = ::android::base::GetBoolProperty("iorapd.perfetto.enable", /*default*/false);
+    readahead_allowed_ = ::android::base::GetBoolProperty("iorapd.readahead.enable",
+                                                          /*default*/false);
 
     rx_lifetime_ = InitializeRxGraph();
     rx_lifetime_jobs_ = InitializeRxGraphForJobScheduledEvents();
@@ -573,8 +585,12 @@ class EventManager::Impl {
     if (!tracing_allowed_) {
       LOG(WARNING) << "Tracing disabled by iorapd.perfetto.enable=false";
     }
+    if (!readahead_allowed_) {
+      LOG(WARNING) << "Readahead disabled by iorapd.readahead.enable=false";
+    }
 
     AppLaunchEventState initial_state{&perfetto_factory_,
+                                      readahead_allowed_,
                                       tracing_allowed_,
                                       &worker_thread2_,
                                       &io_thread_};
@@ -673,6 +689,8 @@ class EventManager::Impl {
         LOG(WARNING) << "EventManager: TaskResultCallbacks may have been released early";
       }
   }
+
+  bool readahead_allowed_{true};
 
   perfetto::RxProducerFactory& perfetto_factory_;
   bool tracing_allowed_{true};
