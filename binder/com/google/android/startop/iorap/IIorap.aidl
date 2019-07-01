@@ -19,6 +19,7 @@ package com.google.android.startop.iorap;
 import com.google.android.startop.iorap.ITaskListener;
 
 import com.google.android.startop.iorap.PackageEvent;
+import com.google.android.startop.iorap.AppLaunchEvent;
 import com.google.android.startop.iorap.AppIntentEvent;
 import com.google.android.startop.iorap.SystemServiceEvent;
 import com.google.android.startop.iorap.SystemServiceUserEvent;
@@ -107,6 +108,7 @@ oneway interface IIorap {
     // in frameworks/base/startop/src/com/google/android/startop/iorap/${Type}Event.java
 
     // void onActivityHintEvent(in RequestId request, in ActivityHintEvent event);
+    void onAppLaunchEvent(in RequestId request, in AppLaunchEvent event);
     void onPackageEvent(in RequestId request, in PackageEvent event);
     void onAppIntentEvent(in RequestId request, in AppIntentEvent event);
     void onSystemServiceEvent(in RequestId request, in SystemServiceEvent event);

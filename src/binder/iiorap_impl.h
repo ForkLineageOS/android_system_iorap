@@ -22,10 +22,16 @@
 
 #include "com/google/android/startop/iorap/BnIorap.h"
 
+#include <memory>
+
 namespace android {
 template <typename Service>
 class BinderService;
 }
+
+namespace iorap::manager {
+  class EventManager;
+};
 
 namespace iorap {
 namespace binder {
@@ -36,7 +42,7 @@ namespace binder {
 // See also IIorap.aidl.
 class IIorapImpl : public ::com::google::android::startop::iorap::BnIorap {
 public:
-  static bool Start();
+  static bool Start(std::shared_ptr<iorap::manager::EventManager> event_manager);
   static constexpr const char* getServiceName() { return "iorapd"; };
 
 // Join all parameter declarations by splitting each parameter with a comma.
