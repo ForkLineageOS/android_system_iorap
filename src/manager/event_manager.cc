@@ -277,7 +277,7 @@ struct AppLaunchEventState {
     DCHECK(allowed_readahead_);
     DCHECK(!IsReadAhead());
 
-    std::string file_path = "/data/misc/iorapd/";
+    std::string file_path = "/system/iorap-trace/";
     file_path += component_name.ToUrlEncodedString();
     file_path += ".compiled_trace.pb";
 
