@@ -94,20 +94,28 @@ struct AppComponentName {
    * '%' is encoded into ^^
    *
    * Two purpose:
-   * 1. This allows the package name to be used as a file name
+   * 1. This allows the component name to be used as a file name
    * ('/' is illegal due to being a path separator) with minimal
    * munging.
-   * 2. This allows the package name to be used in .mk file because
+   * 2. This allows the component name to be used in .mk file because
    * '%' is a special char and cannot be easily escaped in Makefile.
    *
-   * This is a workround for test purpose for camera. Ignoring
-   * activity name because different testing framework triggering
-   * different activity name.
+   * This is a workround for test purpose.
    * Hopefully, the double "@@" and "^^" are not used in other cases.
    */
-  // {"com.foo.bar", ".A%"} -> "com.foo.bar@@"
-  std::string ToMakeFileSafeEncodedPkgString() const {
-    std::string s = package;
+
+  // "com.foo.bar@@.A^^25" -> {"com.foo.bar", ".A%"}
+  static AppComponentName FromMakFileSafeEncodedString(const std::string& s) {
+    std::string cpy = s;
+    Replace(cpy, "@@", "/");
+    Replace(cpy, "^^", "%");
+
+    return FromString(cpy);
+  }
+
+  // {"com.foo.bar", ".A%"} -> "com.foo.bar@@.A^^"
+  std::string ToMakeFileSafeEncodedString() const {
+    std::string s = ToString();
     Replace(s, "/", "@@");
     Replace(s, "%", "^^");
     return s;
@@ -304,7 +312,7 @@ struct AppLaunchEventState {
     // This is changed from "/data/misc/iorapd/" for testing purpose.
     // Should be restored b/139831359.
     std::string file_path = "/product/iorap-trace/";
-    file_path += component_name.ToMakeFileSafeEncodedPkgString();
+    file_path += component_name.ToMakeFileSafeEncodedString();
     file_path += ".compiled_trace.pb";
 
     prefetcher::TaskId task{id, std::move(file_path)};
