@@ -17,8 +17,10 @@
 #include "binder/iiorap_impl.h"
 #include "binder/iiorap_def.h"
 #include "common/macros.h"
+#include "manager/event_manager.h"
 
 #include <android-base/logging.h>
+#include <android-base/properties.h>
 #include <binder/BinderService.h>
 #include <binder/IPCThreadState.h>
 #include <include/binder/request_id.h>
@@ -57,6 +59,25 @@ IIORAP_IFACE_DEF(/*begin*/IORAP_PP_NOP, IIORAP_IMPL_BODY, /*end*/IORAP_PP_NOP);
 #undef IIORAP_IMPL_ARG_NAMES
 #undef IIORAP_IMPL_ARGS
 
+namespace {
+
+struct ServiceParams {
+  bool fake_{false};
+  std::shared_ptr<manager::EventManager> event_manager_;
+};
+
+static std::atomic<bool> s_service_started_{false};
+static std::atomic<bool> s_service_params_ready_{false};
+
+// TODO: BinderService constructs IIorapImpl,
+// but how do I get a pointer to it afterwards?
+//
+// This is a workaround for that, by using a global.
+static ServiceParams s_service_params_;
+static std::atomic<ServiceParams*> s_service_params_atomic_;
+
+}  // namespace anonymous
+
 class IIorapImpl::Impl {
  public:
   void SetTaskListener(const ::android::sp<ITaskListener>& listener) {
@@ -90,20 +111,79 @@ class IIorapImpl::Impl {
     }
   }
 
+  bool OnAppLaunchEvent(const RequestId& request_id,
+                        const AppLaunchEvent& event) {
+    if (MaybeHandleFakeBehavior(request_id)) {
+      return true;
+    }
+
+    return service_params_.event_manager_->OnAppLaunchEvent(request_id, event);
+  }
+
+  void HandleFakeBehavior(const RequestId& request_id) {
+    DCHECK(service_params_.fake_);
+
+    // Send these dummy callbacks for testing only.
+    ReplyWithResult(request_id, TaskResult::State::kBegan);
+    ReplyWithResult(request_id, TaskResult::State::kOngoing);
+    ReplyWithResult(request_id, TaskResult::State::kCompleted);
+  }
+
+  // TODO: Subclass IIorap with a separate fake implementation.
+  bool MaybeHandleFakeBehavior(const RequestId& request_id) {
+    if (service_params_.fake_) {
+      HandleFakeBehavior(request_id);
+      return true;
+    }
+
+    return false;
+  }
+
   ::android::sp<ITaskListener> listener_;
+
+  Impl(ServiceParams p) : service_params_{std::move(p)} {
+    CHECK(service_params_.event_manager_ != nullptr);
+  }
+
+  ServiceParams service_params_;
 };
 
 using Impl = IIorapImpl::Impl;
 
-IIorapImpl::IIorapImpl() : impl_(new Impl()) {}
+IIorapImpl::IIorapImpl() {
+  // Acquire edge of synchronizes-with IIorapImpl::Start().
+  CHECK(s_service_params_ready_.load());
+  // Do not turn this into a DCHECK, the above atomic load
+  // must happen-before the read of s_service_params_ready_.
+  impl_.reset(new Impl(std::move(s_service_params_)));
+}
 
 namespace {
   static bool started_ = false;
 }
-bool IIorapImpl::Start() {
-  if (started_) {
+bool IIorapImpl::Start(std::shared_ptr<manager::EventManager> event_manager) {
+  if (s_service_started_.load()) {  // Acquire-edge (see bottom of function).
+    // Note: Not meant to be idempotent. Two threads could race, and the second
+    // one would likely fail the publish.
+
     LOG(ERROR) << "service was already started";
     return false;  // Already started
+  }
+
+  CHECK(event_manager != nullptr);
+
+  {
+    // This block of code needs to happen-before IIorapImpl::IIorapImpl.
+
+    // TODO: There should be a simpler way of passing down
+    // this data which doesn't involve globals and memory synchronization.
+    ServiceParams* p = &s_service_params_;
+    // TODO: move all property reads to a dedicated Config class.
+    p->fake_ = ::android::base::GetBoolProperty("iorapd.binder.fake", /*default*/false);
+    p->event_manager_ = std::move(event_manager);
+
+    // Release edge of synchronizes-with IIorapImpl::IIorapImpl.
+    s_service_params_ready_.store(true);
   }
 
   ::android::IPCThreadState::self()->disableBackgroundScheduling(/*disable*/true);
@@ -112,6 +192,7 @@ bool IIorapImpl::Start() {
     LOG(ERROR) << "BinderService::publish failed with error code: " << ret;
     return false;
   }
+
   android::sp<android::ProcessState> ps = android::ProcessState::self();
   // Reduce thread consumption by only using 1 thread.
   // We should also be able to leverage this by avoiding locks, etc.
@@ -119,45 +200,72 @@ bool IIorapImpl::Start() {
   ps->startThreadPool();
   ps->giveThreadPoolName();
 
-  started_ = true;
+  // Release edge synchronizes-with the top of this function.
+  s_service_started_.store(true);
 
   return true;
 }
 
 namespace {
-template <typename ... Args>
-void SendArgs(const char* function_name,
-              Impl* self,
-              const RequestId& request_id,
-              Args&&... /*rest*/) {
-  // TODO: verbose, not INFO
-  LOG(VERBOSE) << "IIorap::" << function_name << " (request_id = " << request_id.request_id << ")";
-  // TODO: implementation.
 
-  // Send these dummy callbacks for testing only.
-  // TODO: these should only be sent back when the client connects in a special 'test' mode.
-  self->ReplyWithResult(request_id, TaskResult::State::kBegan);
-  self->ReplyWithResult(request_id, TaskResult::State::kOngoing);
-  self->ReplyWithResult(request_id, TaskResult::State::kCompleted);
+#define MAYBE_HAVE_FAKE_BEHAVIOR(self, request_id) \
+  if (self->MaybeHandleFakeBehavior(request_id)) { return ::android::binder::Status::ok(); }
+
+template <typename ... Args>
+Status SendArgs(const char* function_name,
+                Impl* self,
+                const RequestId& request_id,
+                Args&&... /*rest*/) {
+  LOG(VERBOSE) << "IIorap::" << function_name << " (request_id = " << request_id.request_id << ")";
+
+  MAYBE_HAVE_FAKE_BEHAVIOR(self, request_id);
+
+  // TODO: implementation.
+  LOG(ERROR) << "IIorap::" << function_name << " -- not implemented for real code";
+  return Status::fromStatusT(::android::INVALID_OPERATION);
 }
 
 template <typename ... Args>
-void SendArgs(const char* /*function_name*/, Impl* self, Args&&... rest) {
-  // TODO: may want an assert here for readability.
+Status SendArgs(const char* function_name, Impl* self, Args&&... rest) {
+  DCHECK_EQ(std::string(function_name), "setTaskListener");
   LOG(VERBOSE) << "IIorap::setTaskListener";
   self->SetTaskListener(std::forward<Args&&>(rest)...);
+
+  return Status::ok();
+}
+
+template <typename ... Args>
+Status SendArgs(const char* function_name,
+                Impl* self,
+                const RequestId& request_id,
+                const AppLaunchEvent& app_launch_event) {
+  DCHECK_EQ(std::string(function_name), "onAppLaunchEvent");
+  LOG(VERBOSE) << "IIorap::onAppLaunchEvent";
+
+  MAYBE_HAVE_FAKE_BEHAVIOR(self, request_id);
+
+  if (self->OnAppLaunchEvent(request_id, app_launch_event)) {
+    return Status::ok();
+  } else {
+    // TODO: I suppose this should write out an exception back,
+    // like a service-specific error or something.
+    //
+    // It depends on whether or not we even have any synchronous
+    // errors.
+    //
+    // Most of the work here is done async, so it should handle
+    // async callbacks.
+    return Status::fromStatusT(::android::BAD_VALUE);
+  }
 }
 
 template <typename ... Args>
 Status Send(const char* function_name, Args&&... args) {
   LOG(VERBOSE) << "IIorap::Send(" << function_name << ")";
 
-  SendArgs(function_name, std::forward<Args>(args)...);
+  return SendArgs(function_name, std::forward<Args>(args)...);
+}
+}  // namespace <anonymous>
 
-  // Note: The exact return code doesn't matter: all the AIDL methods are oneway.
-  return Status::ok();
-}
-}
-
-}
-}
+}  // namespace binder
+}  // namespace iorap
