@@ -89,7 +89,7 @@ struct AppComponentName {
     return s;
   }
 
- /*
+  /*
    * '/' is encoded into @@
    * '%' is encoded into ^^
    *
@@ -302,7 +302,7 @@ struct AppLaunchEventState {
     DCHECK(!IsReadAhead());
 
     // This is changed from "/data/misc/iorapd/" for testing purpose.
-    // Should be restored b/139831359.
+    // TODO: b/139831359.
     std::string file_path = "/product/iorap-trace/";
     file_path += component_name.ToMakeFileSafeEncodedPkgString();
     file_path += ".compiled_trace.pb";
