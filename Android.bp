@@ -484,4 +484,35 @@ cc_binary {
   ],
 }
 
+cc_binary {
+  name: "iorap.cmd.prefetcher.client",
+  defaults: [
+      "iorap-default-flags",
+      "iorap-default-dependencies",
+      "libiorap-prefetcher-default-dependencies",
+      "libiorap-serialize-default-dependencies",
+  ],
+  shared_libs: [],
+  include_dirs: [],
+  srcs: [
+      "src/prefetcher/**/*.cc",
+  ],
+  // Easier debugging. TODO: make a separate debug config.
+  // XX: Using -O0 seems to completely hide some errors.
+  cflags: ["-O2", "-UNDEBUG", "-DIORAP_PREFETCHER_MAIN_CLIENT=1"],
+  sanitize: {
+    undefined: true,
+    all_undefined: true,
+    // Pretty print when ubsan detects a problem.
+    // Otherwise it just calls abort().
 
+/*
+    diag: {
+      undefined: true,
+    },
+    */ // don't use the diag when you want it to crash.
+  },
+
+  static_libs: [
+  ],
+}

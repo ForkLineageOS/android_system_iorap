@@ -25,6 +25,7 @@ struct ReadAheadFileEntry;
 
 // Manage I/O readahead for a task.
 class ReadAhead {
+  struct Impl;
  public:
   // Process a task *now*. Currently will block until all readaheads have been
   // issued for all entries in that task.
@@ -34,8 +35,11 @@ class ReadAhead {
   void BeginTask(const TaskId& id);
   // Complete a task, releasing any memory/file descriptors associated with it.
   void FinishTask(const TaskId& id);
+
+  ReadAhead();
+  ~ReadAhead();
  private:
-  bool PerformReadAhead(const ReadAheadFileEntry& entry, size_t length, size_t offset);
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace prefetcher

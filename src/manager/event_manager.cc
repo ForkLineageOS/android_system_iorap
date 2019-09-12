@@ -145,7 +145,9 @@ struct AppLaunchEventState {
   // but changes whenever a new app launch sequence begins.
   size_t sequence_id_ = static_cast<size_t>(-1);
 
-  prefetcher::ReadAhead read_ahead_;
+  // labeled as 'shared' due to rx not being able to handle move-only objects.
+  // lifetime: in practice equivalent to unique_ptr.
+  std::shared_ptr<prefetcher::ReadAhead> read_ahead_;
   bool allowed_readahead_{true};
   bool is_read_ahead_{false};
   std::optional<prefetcher::TaskId> read_ahead_task_;
@@ -163,7 +165,9 @@ struct AppLaunchEventState {
                                bool allowed_readahead,
                                bool allowed_tracing,
                                borrowed<observe_on_one_worker*> thread,
-                               borrowed<observe_on_one_worker*> io_thread) {
+                               borrowed<observe_on_one_worker*> io_thread)
+    : read_ahead_{std::make_shared<prefetcher::ReadAhead>()}
+  {
     perfetto_factory_ = perfetto_factory;
     DCHECK(perfetto_factory_ != nullptr);
 
@@ -308,7 +312,7 @@ struct AppLaunchEventState {
     file_path += ".compiled_trace.pb";
 
     prefetcher::TaskId task{id, std::move(file_path)};
-    read_ahead_.BeginTask(task);
+    read_ahead_->BeginTask(task);
     // TODO: non-void return signature?
 
     read_ahead_task_ = std::move(task);
@@ -317,7 +321,7 @@ struct AppLaunchEventState {
   void FinishReadAhead() {
     DCHECK(IsReadAhead());
 
-    read_ahead_.FinishTask(*read_ahead_task_);
+    read_ahead_->FinishTask(*read_ahead_task_);
     read_ahead_task_ = std::nullopt;
   }
 
