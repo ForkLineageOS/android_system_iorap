@@ -55,6 +55,13 @@ class Session {
   // Single-line summary dump, e.g. for logcat.
   virtual void Dump(std::ostream& os, bool multiline) const = 0;
 
+  // Process the FD for kCreateFdSession.
+  // Assumes there's a compiled_trace.pb at the fd, calling this function
+  // will immediately process it and execute any read-aheads.
+  //
+  // FD is borrowed only for the duration of the function call.
+  virtual bool ProcessFd(int fd) = 0;
+
   // Get the session ID associated with this session.
   // Session IDs are distinct, they are not used for new sessions.
   virtual size_t SessionId() const = 0;
@@ -87,6 +94,8 @@ class SessionBase : public Session {
     return description_;
   }
 
+  virtual bool ProcessFd(int fd) override;
+
  protected:
   SessionBase(size_t session_id, std::string description);
   std::optional<std::string_view> GetFilePath(size_t path_id) const;
@@ -116,6 +125,8 @@ class SessionDirect : public SessionBase {
                            ReadAheadKind kind,
                            size_t length,
                            size_t offset) override;
+
+  virtual bool ProcessFd(int fd) override;
 
   virtual void Dump(std::ostream& os, bool multiline) const override;
 
@@ -190,13 +201,31 @@ class SessionIndirect : public SessionBase {
   // Writes to daemon the new session command.
   SessionIndirect(size_t session_id,
                   std::string description,
-                  std::shared_ptr<PrefetcherDaemon> daemon);
+                  std::shared_ptr<PrefetcherDaemon> daemon,
+                  bool send_command = true);
+
   // Destroys the current session.
   // Writes to daemon that the session is to be destroyed.
   virtual ~SessionIndirect();
 
- private:
+ protected:
   std::shared_ptr<PrefetcherDaemon> daemon_;
+};
+
+// Out-of-process session. Requires prefetcher daemon.
+class SessionIndirectSocket : public SessionIndirect {
+ public:
+  // Creates a new session indirectly.
+  // Writes to daemon the new session command.
+  SessionIndirectSocket(size_t session_id,
+                        int fd,
+                        std::string description,
+                        std::shared_ptr<PrefetcherDaemon> daemon);
+  // Destroys the current session.
+  // Writes to daemon that the session is to be destroyed.
+  virtual ~SessionIndirectSocket();
+
+ private:
 };
 
 

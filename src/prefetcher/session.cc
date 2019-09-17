@@ -26,6 +26,7 @@
 #include <functional>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unordered_map>
@@ -84,6 +85,14 @@ bool SessionBase::InsertFilePath(size_t path_id, std::string file_path) {
   return true;
 }
 
+bool SessionBase::ProcessFd(int fd) {
+  // Only SessionDirect has an implementation of this.
+  // TODO: Maybe add a CommandChoice::kProcessFd ? instead of kCreateFdSession?
+  LOG(FATAL) << "SessionBase::ProcessFd is not implemented";
+
+  return false;
+}
+
 //
 // Direct
 //
@@ -99,13 +108,19 @@ std::ostream& operator<<(std::ostream& os, const SessionDirect::Entry& entry) {
   return os;
 }
 
+// Just in case the failures are slowing down performance, turn them off.
+// static constexpr bool kLogFailures = true;
+static constexpr bool kLogFailures = false;
+
 bool SessionDirect::RegisterFilePath(size_t path_id, std::string_view file_path) {
   std::string file_path_str{file_path};  // no c_str for string_view.
 
   auto fd = TEMP_FAILURE_RETRY(open(file_path_str.c_str(), O_RDONLY));
   if (fd < 0) {
-    PLOG(ERROR) << "Failed to register file path: " << file_path << ", id=" << path_id
-                << ", open(2) failed: ";
+    if (kLogFailures) {
+      PLOG(ERROR) << "Failed to register file path: " << file_path << ", id=" << path_id
+                  << ", open(2) failed: ";
+    }
     fd = android::base::unique_fd{};  // mark as 'bad' descriptor.
   }
 
@@ -320,6 +335,96 @@ void SessionDirect::UnmapWithoutErase(const EntryMapping& entry_mapping) {
 
 }
 
+bool SessionDirect::ProcessFd(int fd) {
+  // TODO: the path is advisory, but it would still be cleaner to pass it separately
+  const char* fd_path = SessionDescription().c_str();
+
+  android::base::Timer open_timer{};
+  android::base::Timer total_timer{};
+
+  serialize::ArenaPtr<serialize::proto::TraceFile> trace_file_ptr =
+      serialize::ProtobufIO::Open(fd, fd_path);
+
+  if (trace_file_ptr == nullptr) {
+    LOG(ERROR) << "SessionDirect::ProcessFd failed, corrupted protobuf format? " << fd_path;
+    return false;
+  }
+
+  // TODO: maybe make it part of a kProcessFd type of command?
+  ReadAheadKind kind = ReadAheadKind::kFadvise;
+
+  // TODO: The "Task[Id]" should probably be the one owning the trace file.
+  // When the task is fully complete, the task can be deleted and the
+  // associated arenas can go with them.
+
+  // TODO: we should probably have the file entries all be relative
+  // to the package path?
+
+  // Open every file in the trace index.
+  const serialize::proto::TraceFileIndex& index = trace_file_ptr->index();
+
+  size_t count_entries = 0;
+  for (const serialize::proto::TraceFileIndexEntry& index_entry : index.entries()) {
+    LOG(VERBOSE) << "ReadAhead: found file entry: " << index_entry.file_name();
+
+    if (index_entry.id() < 0) {
+      LOG(WARNING) << "ReadAhead: Skip bad TraceFileIndexEntry, negative ID not allowed: "
+                   << index_entry.id();
+      continue;
+    }
+
+    size_t path_id = index_entry.id();
+    const auto& path_file_name = index_entry.file_name();
+
+    if (!this->RegisterFilePath(path_id, path_file_name)) {
+      LOG(WARNING) << "ReadAhead: Failed to register file path: " << path_file_name;
+      ++count_entries;
+    }
+  }
+  LOG(VERBOSE) << "ReadAhead: Registered " << count_entries << " file paths";
+  std::chrono::milliseconds open_duration_ms = open_timer.duration();
+
+  LOG(DEBUG) << "ProcessFd: open+parsed headers in " << open_duration_ms.count() << "ms";
+
+  // Go through every trace entry and readahead every (file,offset,len) tuple.
+  size_t entry_offset = 0;
+  const serialize::proto::TraceFileList& file_list = trace_file_ptr->list();
+  for (const serialize::proto::TraceFileEntry& file_entry : file_list.entries()) {
+    ++entry_offset;
+
+    if (file_entry.file_length() < 0 || file_entry.file_offset() < 0) {
+      LOG(WARNING) << "ProcessFd entry negative file length or offset, illegal: "
+                   << "index_id=" << file_entry.index_id() << ", skipping";
+      continue;
+    }
+
+    // Attempt to perform readahead. This can generate more warnings dynamically.
+    if (!this->ReadAhead(file_entry.index_id(),
+                         kind,
+                         file_entry.file_length(),
+                         file_entry.file_offset())) {
+      if (kLogFailures) {
+        LOG(WARNING) << "Failed readahead, bad file length/offset in entry @ "
+                     << (entry_offset - 1);
+      }
+    }
+  }
+
+  std::chrono::milliseconds total_duration_ms = total_timer.duration();
+  LOG(DEBUG) << "ProcessFd: total duration " << total_duration_ms.count() << "ms";
+
+  {
+    struct timeval now;
+    gettimeofday(&now, nullptr);
+
+    uint64_t now_usec = (now.tv_sec * 1000000LL + now.tv_usec);
+    LOG(DEBUG) << "ProcessFd: finishing usec: " << now_usec;
+  }
+
+  return true;
+}
+
+
 static bool IsDumpEveryEntry() {
   // Set to 'true' to dump every single entry for debugging (multiline).
   // Otherwise it only prints per-file-path summaries.
@@ -327,10 +432,19 @@ static bool IsDumpEveryEntry() {
 }
 
 static bool IsDumpEveryPath() {
+  // Dump per-file-path (entry) stats. Defaults to on if the above property is on.
   return ::android::base::GetBoolProperty("iorapd.readahead.dump_paths", /*default*/false);
 }
 
 void SessionDirect::Dump(std::ostream& os, bool multiline) const {
+  {
+    struct timeval now;
+    gettimeofday(&now, nullptr);
+
+    uint64_t now_usec = (now.tv_sec * 1000000LL + now.tv_usec);
+    LOG(DEBUG) << "SessionDirect::Dump: beginning usec: " << now_usec;
+  }
+
   size_t path_count = entry_list_map_.size();
 
   size_t read_ahead_entries = 0;
@@ -384,8 +498,9 @@ void SessionDirect::Dump(std::ostream& os, bool multiline) const {
     os << "}";
     return;
   } else {
+    // Always try to pay attention to these stats below.
+    // They can be signs of potential performance problems.
     os << "Session Direct (id=" << SessionId() << ")" << std::endl;
-    // TODO: detailed pathid->name, pathid->total size (sum of lengths) and count.
 
     os << "  Summary: " << std::endl;
     os << "    Duration = " << timer_.duration().count() << "ms" << std::endl;
@@ -396,7 +511,8 @@ void SessionDirect::Dump(std::ostream& os, bool multiline) const {
     os << " (good: " << overall_success_byte_rate << "%)" << std::endl;
     os << std::endl;
 
-    if (!IsDumpEveryPath()) {
+    // Probably too spammy, but they could narrow down the issue for a problem in above stats.
+    if (!IsDumpEveryPath() && !IsDumpEveryEntry()) {
       return;
     }
 
@@ -487,10 +603,15 @@ SessionDirect::~SessionDirect() {
 
 SessionIndirect::SessionIndirect(size_t session_id,
                                  std::string description,
-                                 std::shared_ptr<PrefetcherDaemon> daemon)
+                                 std::shared_ptr<PrefetcherDaemon> daemon,
+                                 bool send_command)
     : SessionBase{session_id, description},
       daemon_{daemon} {
-  // TODO: all of the WriteCommand etc in the daemon.
+  // Don't do anything in e.g. subclasses.
+  if (!send_command) {
+    return;
+  }
+
   Command cmd{};
   cmd.choice = CommandChoice::kCreateSession;
   cmd.session_id = session_id;
@@ -513,8 +634,6 @@ SessionIndirect::~SessionIndirect() {
     LOG(WARNING) << "SessionIndirect: Failure to destroy session " << SessionId()
                  << ", description: " << SessionDescription();
   }
-
-  // TODO: all of the WriteCommand etc in the daemon.
 }
 
 void SessionIndirect::Dump(std::ostream& os, bool multiline) const {
@@ -567,6 +686,36 @@ bool SessionIndirect::UnreadAhead(size_t path_id,
                                   size_t offset) {
   LOG(WARNING) << "UnreadAhead: command not implemented yet";
   return true;
+}
+
+//
+// IndirectSocket
+//
+
+SessionIndirectSocket::SessionIndirectSocket(size_t session_id,
+                                             int fd,
+                                             std::string description,
+                                             std::shared_ptr<PrefetcherDaemon> daemon)
+    : SessionIndirect{session_id, description, daemon, /*send_command*/false} {
+  // TODO: all of the WriteCommand etc in the daemon.
+  Command cmd{};
+  cmd.choice = CommandChoice::kCreateFdSession;
+  cmd.fd = fd;
+  cmd.session_id = session_id;
+  cmd.file_path = description;
+
+  LOG(VERBOSE) << "SessionIndirectSocket: " << cmd;
+
+  if (!daemon_->SendCommand(cmd)) {
+    LOG(FATAL) << "SessionIndirectSocket: Failure to create session " << session_id
+               << ", description: " << description;
+  }
+
+  // This goes into the SessionDirect ctor + SessionDirect::ProcessFd
+  // as implemented in PrefetcherDaemon::ReceiveCommand
+}
+
+SessionIndirectSocket::~SessionIndirectSocket() {
 }
 
 }  // namespace prefetcher

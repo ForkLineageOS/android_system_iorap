@@ -15,6 +15,7 @@
 #ifndef PREFETCHER_SESSION_MANAGER_H_
 #define PREFETCHER_SESSION_MANAGER_H_
 
+#include <optional>
 #include <ostream>
 #include <memory>
 
@@ -26,6 +27,7 @@ class Session;
 enum class SessionKind : uint32_t {
   kInProcessDirect,
   kOutOfProcessIpc,
+  kOutOfProcessSocket,
 };
 
 inline std::ostream& operator<<(std::ostream& os, SessionKind kind) {
@@ -33,6 +35,8 @@ inline std::ostream& operator<<(std::ostream& os, SessionKind kind) {
     os << "kInProcessDirect";
   } else if (kind == SessionKind::kOutOfProcessIpc) {
     os << "kOutOfProcessIpc";
+  } else if (kind == SessionKind::kOutOfProcessSocket) {
+    os << "kOutOfProcessSocket";
   } else {
     os << "(invalid)";
   }
@@ -48,6 +52,15 @@ class SessionManager {
   // be called prior to all refs dropping to 0.
   virtual std::shared_ptr<Session> CreateSession(size_t session_id,
                                                  std::string description) = 0;
+
+  // Create a new session. The description is used by Dump.
+  // Manager maintains a strong ref to this session, so DestroySession must also
+  // be called prior to all refs dropping to 0.
+  virtual std::shared_ptr<Session> CreateSession(size_t session_id,
+                                                 std::string description,
+                                                 std::optional<int> fd) {
+    return CreateSession(session_id, description);
+  }
 
   // Look up an existing session that was already created.
   // Returns null if there is no such session.

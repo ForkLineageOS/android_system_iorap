@@ -27,6 +27,7 @@ namespace prefetcher {
 struct PrefetcherForkParameters {
   int input_fd;
   int output_fd;
+  bool use_sockets;  // use the socket path instead of simpler read/write path.
   bool format_text;  // true=>text, false=>binary
 };
 
@@ -34,7 +35,8 @@ inline std::ostream& operator<<(std::ostream& os, const PrefetcherForkParameters
   os << "PrefetcherForkParameters{";
   os << "input_fd=" << p.input_fd << ",";
   os << "output_fd=" << p.output_fd << ",";
-  os << "format_text=" << p.format_text << "";
+  os << "format_text=" << p.format_text << ",";
+  os << "use_sockets=" << p.use_sockets << ",";
   os << "}";
   return os;
 }
@@ -60,6 +62,7 @@ enum class CommandChoice : uint32_t {
   kDestroySession,     // kDestroySession <sid:uint32>
   kDumpSession,        // kDumpSession <sid:uint32>
   kDumpEverything,     // kDumpEverything
+  kCreateFdSession,    // kCreateFdSession $CMSG{<fd:int>} <sid:uint32> <description:c-string>
 };
 
 struct Command {
@@ -74,12 +77,18 @@ struct Command {
   uint64_t length;
   uint64_t offset;
 
+  std::optional<int> fd;  // only valid in kCreateFdSession.
+
   // Deserialize from a char buffer.
   // This can only fail if buf_size is too small.
   static std::optional<Command> Read(char* buf, size_t buf_size, /*out*/size_t* consumed_bytes);
   // Serialize to a char buffer.
   // This can only fail if the buf_size is too small.
   bool Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) const;
+
+  bool RequiresFd() const {
+    return choice == CommandChoice::kCreateFdSession;
+  }
 };
 
 std::ostream& operator<<(std::ostream& os, const Command& command);
@@ -96,6 +105,9 @@ class PrefetcherDaemon {
 
   // Launch a new fork , returning the pipes as input/output fds.
   std::optional<PrefetcherForkParameters> StartPipesViaFork();
+
+  // Launch a new fork , returning the socket pair as input/output fds.
+  std::optional<PrefetcherForkParameters> StartSocketViaFork();
 
   // Execute the main code in-process.
   //
