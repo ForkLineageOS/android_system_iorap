@@ -16,6 +16,7 @@
 
 #include "binder/iiorap_impl.h"
 #include "common/debug.h"
+#include "common/loggers.h"
 #include "manager/event_manager.h"
 
 #include <android-base/logging.h>
@@ -27,27 +28,6 @@
 
 static constexpr const char* kServiceName = iorap::binder::IIorapImpl::getServiceName();
 
-// Log to both Stderr and Logd for convenience when running this from the command line.
-class StderrAndLogdLogger {
- public:
-  explicit StderrAndLogdLogger(android::base::LogId default_log_id = android::base::MAIN)
-    : logd_(default_log_id) {
-  }
-
-  void operator()(::android::base::LogId id,
-                  ::android::base::LogSeverity sev,
-                  const char* tag,
-                  const char* file,
-                  unsigned int line,
-                  const char* message) {
-    logd_(id, sev, tag, file, line, message);
-    StderrLogger(id, sev, tag, file, line, message);
-  }
-
- private:
-  ::android::base::LogdLogger logd_;
-};
-
 int main(int /*argc*/, char** argv) {
   if (android::base::GetBoolProperty("iorapd.log.verbose", iorap::kIsDebugBuild)) {
     // Show verbose logs if the property is enabled or if we are a debug build.
@@ -55,7 +35,7 @@ int main(int /*argc*/, char** argv) {
   }
 
   // Logs go to system logcat.
-  android::base::InitLogging(argv, StderrAndLogdLogger{android::base::SYSTEM});
+  android::base::InitLogging(argv, iorap::common::StderrAndLogdLogger{android::base::SYSTEM});
 
   {
     android::ScopedTrace trace_main{ATRACE_TAG_PACKAGE_MANAGER, "main"};
