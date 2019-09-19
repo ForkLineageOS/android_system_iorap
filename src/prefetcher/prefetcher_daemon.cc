@@ -13,10 +13,14 @@
 // limitations under the License.
 
 #include "prefetcher/prefetcher_daemon.h"
+#include "prefetcher/session_manager.h"
+#include "prefetcher/session.h"
 
 #include <android-base/logging.h>
+#include <android-base/properties.h>
 
 #include <deque>
+#include <iomanip>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -26,6 +30,22 @@
 #include <unistd.h>
 
 namespace iorap::prefetcher {
+
+// Gate super-spammy IPC logging behind a property.
+// This is beyond merely annoying, enabling this logging causes prefetching to be about 1000x slower.
+static bool LogVerboseIpc() {
+  static bool initialized = false;
+  static bool verbose_ipc;
+
+  if (initialized == false) {
+    initialized = true;
+
+    verbose_ipc =
+        ::android::base::GetBoolProperty("iorapd.readahead.verbose_ipc", /*default*/false);
+  }
+
+  return verbose_ipc;
+}
 
 static constexpr const char kCommandFileName[] = "/system/bin/iorap.prefetcherd";
 
@@ -53,10 +73,25 @@ std::unique_ptr<ArgString[]> VecToArgv(const char* program_name,
   return ptr;
 }
 
-std::ostream& operator<<(std::ostream& os, const Command& command) {
-  os << "Command{";
-  os << "choice=";
-  switch (command.choice) {
+std::ostream& operator<<(std::ostream& os, ReadAheadKind ps) {
+  switch (ps) {
+    case ReadAheadKind::kFadvise:
+      os << "fadvise";
+      break;
+    case ReadAheadKind::kMmapLocked:
+      os << "mmap";
+      break;
+    case ReadAheadKind::kMlock:
+      os << "mlock";
+      break;
+    default:
+      os << "<invalid>";
+  }
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, CommandChoice choice) {
+  switch (choice) {
     case CommandChoice::kRegisterFilePath:
       os << "kRegisterFilePath";
       break;
@@ -69,18 +104,89 @@ std::ostream& operator<<(std::ostream& os, const Command& command) {
     case CommandChoice::kExit:
       os << "kExit";
       break;
+    case CommandChoice::kCreateSession:
+      os << "kCreateSession";
+      break;
+    case CommandChoice::kDestroySession:
+      os << "kDestroySession";
+      break;
+    case CommandChoice::kDumpSession:
+      os << "kDumpSession";
+      break;
+    case CommandChoice::kDumpEverything:
+      os << "kDumpEverything";
+      break;
     default:
       CHECK(false) << "forgot to handle this choice";
       break;
   }
-  os << ",";
-  os << "id=" << command.id << ",";
-  os << "file_path=";
+  return os;
+}
 
-  if (command.file_path) {
-    os << *(command.file_path);
-  } else {
-    os << "(nullopt)";
+std::ostream& operator<<(std::ostream& os, const Command& command) {
+  os << "Command{";
+  os << "choice=" << command.choice << ",";
+
+  bool has_session_id = true;
+  bool has_id = true;
+  switch (command.choice) {
+    case CommandChoice::kDumpEverything:
+    case CommandChoice::kExit:
+      has_session_id = false;
+      FALLTHROUGH_INTENDED;
+    case CommandChoice::kCreateSession:
+    case CommandChoice::kDestroySession:
+    case CommandChoice::kDumpSession:
+      has_id = false;
+      break;
+    default:
+      break;
+  }
+
+  if (has_session_id) {
+    os << "sid=" << command.session_id << ",";
+  }
+
+  if (has_id) {
+    os << "id=" << command.id << ",";
+  }
+
+  switch (command.choice) {
+    case CommandChoice::kRegisterFilePath:
+      os << "file_path=";
+
+      if (command.file_path) {
+        os << *(command.file_path);
+      } else {
+        os << "(nullopt)";
+      }
+      break;
+    case CommandChoice::kUnregisterFilePath:
+      break;
+    case CommandChoice::kReadAhead:
+      os << "read_ahead_kind=" << command.read_ahead_kind << ",";
+      os << "length=" << command.length << ",";
+      os << "offset=" << command.offset << ",";
+      break;
+    case CommandChoice::kExit:
+      break;
+    case CommandChoice::kCreateSession:
+      os << "description=";
+      if (command.file_path) {
+        os << "'" << *(command.file_path) << "'";
+      } else {
+        os << "(nullopt)";
+      }
+      break;
+    case CommandChoice::kDestroySession:
+      break;
+    case CommandChoice::kDumpSession:
+      break;
+    case CommandChoice::kDumpEverything:
+      break;
+    default:
+      CHECK(false) << "forgot to handle this choice";
+      break;
   }
 
   os << "}";
@@ -102,7 +208,8 @@ struct ParseResult {
   }
 };
 
-static constexpr bool kDebugParsingRead = true;
+// Very spammy: Keep it off by default. Set to true if changing this code.
+static constexpr bool kDebugParsingRead = false;
 
 #define DEBUG_PREAD if (kDebugParsingRead) LOG(VERBOSE) << "ParsingRead "
 
@@ -184,25 +291,31 @@ class CommandParser {
 
     std::vector<Command> commands_vec;
 
-    char buf[1024] = {};
+    std::vector<char> buf_vector;
+    buf_vector.resize(1024*1024);  // 1MB.
+    char* buf = &buf_vector[0];
 
     // Binary only parsing. The higher level code can parse text
     // with ifstream if it really wants to.
     char* stream = &buf[0];
-    size_t stream_size = sizeof(buf);
+    size_t stream_size = buf_vector.size();
 
     while (true) {
       if (stream_size == 0) {
         // TODO: reply with an overflow command.
         LOG(WARNING) << "prefetcher_daemon command overflow, dropping all commands.";
         stream = &buf[0];
-        stream_size = sizeof(buf);
-        memset(&buf[0], /*c*/0, sizeof(buf));
+        stream_size = buf_vector.size();
+        memset(&buf[0], /*c*/0, buf_vector.size());
       }
 
-      LOG(VERBOSE) << "PrefetcherDaemon block in read for commands";
+      if (LogVerboseIpc()) {
+        LOG(VERBOSE) << "PrefetcherDaemon block read for commands (fd=" << params_.input_fd << ")";
+      }
       ssize_t count = TEMP_FAILURE_RETRY(read(params_.input_fd, stream, stream_size));
-      LOG(VERBOSE) << "PrefetcherDaemon::read " << count << " for stream size:" << stream_size;
+      if (LogVerboseIpc()) {
+        LOG(VERBOSE) << "PrefetcherDaemon::read " << count << " for stream size:" << stream_size;
+      }
 
       if (count < 0) {
         PLOG(ERROR) << "failed to read from input fd";
@@ -216,7 +329,9 @@ class CommandParser {
       }
 
       longbuf_.insert(longbuf_.end(), stream, stream + count);
-      LOG(VERBOSE) << "PrefetcherDaemon updated longbuf size: " << longbuf_.size();
+      if (LogVerboseIpc()) {
+        LOG(VERBOSE) << "PrefetcherDaemon updated longbuf size: " << longbuf_.size();
+      }
 
       std::optional<Command> maybe_command;
       {
@@ -227,7 +342,18 @@ class CommandParser {
         std::vector<char> v(longbuf_.begin(),
                             longbuf_.end());
 
-        LOG(VERBOSE) << "PrefetcherDaemon temp v size: " << v.size();
+        if (LogVerboseIpc()) {
+          LOG(VERBOSE) << "PrefetcherDaemon longbuf_ size: " << v.size();
+          if (WOULD_LOG(VERBOSE)) {
+            std::stringstream dump;
+            dump << std::hex << std::setfill('0');
+            for (size_t i = 0; i < v.size(); ++i) {
+              dump << std::setw(2) << static_cast<unsigned>(v[i]);
+            }
+
+            LOG(VERBOSE) << "PrefetcherDaemon longbuf_ dump: " << dump.str();
+          }
+        }
 
         size_t v_off = 0;
         size_t consumed_bytes = std::numeric_limits<size_t>::max();
@@ -236,9 +362,12 @@ class CommandParser {
         while (true) {
           maybe_command = Command::Read(&v[v_off], v.size() - v_off, &consumed_bytes);
           consumed_total += consumed_bytes;
+          // Normal every time we get to the end of a buffer.
           if (!maybe_command) {
-            LOG(VERBOSE) << "failed to read command, v_off=" << v_off << ",v_size:" << v.size();
-            break;
+              if (LogVerboseIpc()) {
+                LOG(VERBOSE) << "failed to read command, v_off=" << v_off << ",v_size:" << v.size();
+              }
+              break;
           }
 
           // in the next pass ignore what we already consumed.
@@ -246,11 +375,13 @@ class CommandParser {
 
           // true as long we don't hit the 'break' above.
           DCHECK_EQ(v_off, consumed_total);
-          LOG(VERBOSE) << "success to read command, v_off=" << v_off << ",v_size:" << v.size()
-                       << "," << *maybe_command;
+          if (LogVerboseIpc()) {
+            LOG(VERBOSE) << "success to read command, v_off=" << v_off << ",v_size:" << v.size()
+                         << "," << *maybe_command;
 
-          // Pretty-print a single command for debugging/testing.
-          LOG(VERBOSE) << *maybe_command;
+            // Pretty-print a single command for debugging/testing.
+            LOG(VERBOSE) << *maybe_command;
+          }
 
           // add to the commands we parsed.
           commands_vec.push_back(*maybe_command);
@@ -277,7 +408,7 @@ class CommandParser {
   std::deque<char> longbuf_;
 };
 
-static constexpr bool kDebugCommandRead = true;
+static constexpr bool kDebugCommandRead = false;
 
 #define DEBUG_READ if (kDebugCommandRead) LOG(VERBOSE) << "Command::Read "
 
@@ -287,7 +418,7 @@ std::optional<Command> Command::Read(char* buf, size_t buf_size, /*out*/size_t* 
     return std::nullopt;
   }
 
-  Command cmd;
+  Command cmd{};  // zero-initialize any unused fields
   ParseResult<CommandChoice> parsed_choice = ParsingRead<CommandChoice>(buf, buf_size);
   cmd.choice = parsed_choice.value;
 
@@ -298,7 +429,13 @@ std::optional<Command> Command::Read(char* buf, size_t buf_size, /*out*/size_t* 
 
   switch (parsed_choice.value) {
     case CommandChoice::kRegisterFilePath: {
-      ParseResult<uint32_t> parsed_id = ParsingRead<uint32_t>(parsed_choice);
+      ParseResult<uint32_t> parsed_session_id = ParsingRead<uint32_t>(parsed_choice);
+      if (!parsed_session_id) {
+        DEBUG_READ << "no parsed session id";
+        return std::nullopt;
+      }
+
+      ParseResult<uint32_t> parsed_id = ParsingRead<uint32_t>(parsed_session_id);
       if (!parsed_id) {
         DEBUG_READ << "no parsed id";
         return std::nullopt;
@@ -312,29 +449,105 @@ std::optional<Command> Command::Read(char* buf, size_t buf_size, /*out*/size_t* 
       }
       *consumed_bytes = parsed_file_path.next_token - buf;
 
-      cmd.choice = parsed_choice.value;
+      cmd.session_id = parsed_session_id.value;
       cmd.id = parsed_id.value;
       cmd.file_path = parsed_file_path.value;
 
       break;
     }
-    case CommandChoice::kUnregisterFilePath:
-      // fall-through
-    case CommandChoice::kReadAhead: {
-      ParseResult<uint32_t> parsed_id = ParsingRead<uint32_t>(parsed_choice);
+    case CommandChoice::kUnregisterFilePath: {
+      ParseResult<uint32_t> parsed_session_id = ParsingRead<uint32_t>(parsed_choice);
+      if (!parsed_session_id) {
+        DEBUG_READ << "no parsed session id";
+        return std::nullopt;
+      }
 
+      ParseResult<uint32_t> parsed_id = ParsingRead<uint32_t>(parsed_session_id);
       if (!parsed_id) {
         DEBUG_READ << "no parsed id";
         return std::nullopt;
       }
       *consumed_bytes = parsed_id.next_token - buf;
 
-      cmd.choice = parsed_choice.value;
+      cmd.session_id = parsed_session_id.value;
       cmd.id = parsed_id.value;
 
       break;
     }
+    case CommandChoice::kReadAhead: {
+      ParseResult<uint32_t> parsed_session_id = ParsingRead<uint32_t>(parsed_choice);
+      if (!parsed_session_id) {
+        DEBUG_READ << "no parsed session id";
+        return std::nullopt;
+      }
+
+      ParseResult<uint32_t> parsed_id = ParsingRead<uint32_t>(parsed_session_id);
+      if (!parsed_id) {
+        DEBUG_READ << "no parsed id";
+        return std::nullopt;
+      }
+
+      ParseResult<ReadAheadKind> parsed_kind = ParsingRead<ReadAheadKind>(parsed_id);
+      if (!parsed_kind) {
+        DEBUG_READ << "no parsed kind";
+        return std::nullopt;
+      }
+      ParseResult<uint64_t> parsed_length = ParsingRead<uint64_t>(parsed_kind);
+      if (!parsed_length) {
+        DEBUG_READ << "no parsed length";
+        return std::nullopt;
+      }
+      ParseResult<uint64_t> parsed_offset = ParsingRead<uint64_t>(parsed_length);
+      if (!parsed_offset) {
+        DEBUG_READ << "no parsed offset";
+        return std::nullopt;
+      }
+      *consumed_bytes = parsed_offset.next_token - buf;
+
+      cmd.session_id = parsed_session_id.value;
+      cmd.id = parsed_id.value;
+      cmd.read_ahead_kind = parsed_kind.value;
+      cmd.length = parsed_length.value;
+      cmd.offset = parsed_offset.value;
+
+      break;
+    }
+    case CommandChoice::kCreateSession: {
+      ParseResult<uint32_t> parsed_session_id = ParsingRead<uint32_t>(parsed_choice);
+      if (!parsed_session_id) {
+        DEBUG_READ << "no parsed session id";
+        return std::nullopt;
+      }
+
+      ParseResult<std::string> parsed_description = ParsingRead<std::string>(parsed_session_id);
+
+      if (!parsed_description) {
+        DEBUG_READ << "no description";
+        return std::nullopt;
+      }
+      *consumed_bytes = parsed_description.next_token - buf;
+
+      cmd.session_id = parsed_session_id.value;
+      cmd.file_path = parsed_description.value;
+
+      break;
+    }
+    case CommandChoice::kDestroySession:
+    case CommandChoice::kDumpSession: {
+      ParseResult<uint32_t> parsed_session_id = ParsingRead<uint32_t>(parsed_choice);
+      if (!parsed_session_id) {
+        DEBUG_READ << "no parsed session id";
+        return std::nullopt;
+      }
+
+      *consumed_bytes = parsed_session_id.next_token - buf;
+
+      cmd.session_id = parsed_session_id.value;
+
+      break;
+    }
     case CommandChoice::kExit:
+    case CommandChoice::kDumpEverything:
       *consumed_bytes = parsed_choice.next_token - buf;
       // Only need to parse the choice.
       break;
@@ -346,9 +559,10 @@ std::optional<Command> Command::Read(char* buf, size_t buf_size, /*out*/size_t* 
   return cmd;
 }
 
-bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) {
+bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) const {
   *produced_bytes = 0;
   if (buf == nullptr) {
+    LOG(WARNING) << "null buf, is this expected?";
     return false;
   }
 
@@ -359,6 +573,7 @@ bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) {
 
   switch (choice) {
     case CommandChoice::kRegisterFilePath:
+      space_requirement += sizeof(session_id);
       space_requirement += sizeof(id);
       space_requirement += sizeof(uint32_t);    // string length
 
@@ -370,11 +585,33 @@ bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) {
       space_requirement += file_path->size(); // string contents
       break;
     case CommandChoice::kUnregisterFilePath:
-      // fall-through
-    case CommandChoice::kReadAhead:
+      space_requirement += sizeof(session_id);
       space_requirement += sizeof(id);
       break;
+    case CommandChoice::kReadAhead:
+      space_requirement += sizeof(session_id);
+      space_requirement += sizeof(id);
+      space_requirement += sizeof(read_ahead_kind);
+      space_requirement += sizeof(length);
+      space_requirement += sizeof(offset);
+      break;
+    case CommandChoice::kCreateSession:
+      space_requirement += sizeof(session_id);
+      space_requirement += sizeof(uint32_t);    // string length
+
+      if (!file_path) {
+        LOG(WARNING) << "Missing file path for kCreateSession";
+        return false;
+      }
+
+      space_requirement += file_path->size(); // string contents
+      break;
+    case CommandChoice::kDestroySession:
+    case CommandChoice::kDumpSession:
+      space_requirement += sizeof(session_id);
+      break;
     case CommandChoice::kExit:
+    case CommandChoice::kDumpEverything:
       // Only need space for the choice.
       break;
     default:
@@ -396,6 +633,8 @@ bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) {
 
   switch (choice) {
     case CommandChoice::kRegisterFilePath:
+      memcpy(&buf[buf_offset], &session_id, sizeof(session_id));
+      buf_offset += sizeof(session_id);
       memcpy(&buf[buf_offset], &id, sizeof(id));
       buf_offset += sizeof(id);
 
@@ -408,15 +647,52 @@ bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) {
       DCHECK(file_path.has_value());
 
       memcpy(&buf[buf_offset], file_path->c_str(), file_path->size());
-      buf_offset += sizeof(file_path->size());
+      buf_offset += file_path->size();
       break;
     case CommandChoice::kUnregisterFilePath:
-      // fall-through
-    case CommandChoice::kReadAhead:
+      memcpy(&buf[buf_offset], &session_id, sizeof(session_id));
+      buf_offset += sizeof(session_id);
       memcpy(&buf[buf_offset], &id, sizeof(id));
       buf_offset += sizeof(id);
       break;
+    case CommandChoice::kReadAhead:
+      memcpy(&buf[buf_offset], &session_id, sizeof(session_id));
+      buf_offset += sizeof(session_id);
+      memcpy(&buf[buf_offset], &id, sizeof(id));
+      buf_offset += sizeof(id);
+      memcpy(&buf[buf_offset], &read_ahead_kind, sizeof(read_ahead_kind));
+      buf_offset += sizeof(read_ahead_kind);
+      memcpy(&buf[buf_offset], &length, sizeof(length));
+      buf_offset += sizeof(length);
+      memcpy(&buf[buf_offset], &offset, sizeof(offset));
+      buf_offset += sizeof(offset);
+      break;
+    case CommandChoice::kCreateSession:
+      memcpy(&buf[buf_offset], &session_id, sizeof(session_id));
+      buf_offset += sizeof(session_id);
+
+      {
+        uint32_t string_length = static_cast<uint32_t>(file_path->size());
+        memcpy(&buf[buf_offset], &string_length, sizeof(string_length));
+        buf_offset += sizeof(string_length);
+      }
+
+      DCHECK(file_path.has_value());
+
+      memcpy(&buf[buf_offset], file_path->c_str(), file_path->size());
+      buf_offset += file_path->size();
+
+      DCHECK_EQ(buf_offset, space_requirement) << *this << ",file_path_size:" << file_path->size();
+      DCHECK_EQ(buf_offset, *produced_bytes) << *this;
+
+      break;
+    case CommandChoice::kDestroySession:
+    case CommandChoice::kDumpSession:
+      memcpy(&buf[buf_offset], &session_id, sizeof(session_id));
+      buf_offset += sizeof(session_id);
+      break;
     case CommandChoice::kExit:
+    case CommandChoice::kDumpEverything:
       // Only need to write out the choice.
       break;
     default:
@@ -425,8 +701,8 @@ bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) {
       break;
   }
 
-  DCHECK_EQ(buf_offset, space_requirement);
-  DCHECK_EQ(buf_offset, *produced_bytes);
+  DCHECK_EQ(buf_offset, space_requirement) << *this;
+  DCHECK_EQ(buf_offset, *produced_bytes) << *this;
 
   return true;
 }
@@ -435,7 +711,7 @@ class PrefetcherDaemon::Impl {
  public:
   std::optional<PrefetcherForkParameters> StartPipesViaFork() {
     int pipefds[2];
-    if (!pipe(&pipefds[0])) {
+    if (pipe(&pipefds[0]) != 0) {
       PLOG(FATAL) << "Failed to create read/write pipes";
     }
 
@@ -459,11 +735,13 @@ class PrefetcherDaemon::Impl {
     params_ = params;
 
     forked_ = true;
-    parent_ = fork();
+    child_ = fork();
 
-    if (parent_ == -1) {
+    if (child_ == -1) {
       LOG(FATAL) << "Failed to fork PrefetcherDaemon";
-    } else if (parent_ > 0) {  // we are the caller of this function
+    } else if (child_ > 0) {  // we are the caller of this function
+      LOG(DEBUG) << "forked into iorap.prefetcherd, pid = " << child_;
+
       return true;
     } else {
       // we are the child that was forked.
@@ -476,22 +754,32 @@ class PrefetcherDaemon::Impl {
         std::stringstream s;
         s << "--input-fd";
         argv_vec.push_back(s.str());
-        s.clear();
-        s << params.input_fd;
-        argv_vec.push_back(s.str());
 
-        argv << "--input-fd" << " " << params.input_fd;
+        std::stringstream s2;
+        s2 << params.input_fd;
+        argv_vec.push_back(s2.str());
+
+        argv << " --input-fd" << " " << params.input_fd;
       }
 
       {
         std::stringstream s;
         s << "--output-fd";
         argv_vec.push_back(s.str());
-        s.clear();
-        s << params.output_fd;
+
+        std::stringstream s2;
+        s2 << params.output_fd;
+        argv_vec.push_back(s2.str());
+
+        argv << " --output-fd" << " " << params.output_fd;
+      }
+
+      if (WOULD_LOG(VERBOSE)) {
+        std::stringstream s;
+        s << "--verbose";
         argv_vec.push_back(s.str());
 
-        argv << "--output-fd" << " " << params.output_fd;
+        argv << " --verbose";
       }
 
       std::unique_ptr<ArgString[]> argv_ptr = VecToArgv(kCommandFileName, argv_vec);
@@ -507,9 +795,11 @@ class PrefetcherDaemon::Impl {
     return false;
   }
 
+  // TODO: Not very useful since this can never return 'true'
+  // -> in the child we would've already execd which loses all this code.
   bool IsDaemon() {
     // In the child the pid is always 0.
-    return parent_ > 0;
+    return child_ > 0;
   }
 
   bool Main(PrefetcherForkParameters params) {
@@ -532,11 +822,17 @@ class PrefetcherDaemon::Impl {
       }
 
       for (auto& command : many_commands) {
-        LOG(VERBOSE) << "PrefetcherDaemon got command: " << command;
+        if (LogVerboseIpc()) {
+          LOG(VERBOSE) << "PrefetcherDaemon got command: " << command;
+        }
 
         if (command.choice == CommandChoice::kExit) {
           LOG(DEBUG) << "PrefetcherDaemon got kExit command, terminating";
           return true;
+        }
+
+        if (!ReceiveCommand(command)) {
+          LOG(WARNING) << "PrefetcherDaemon command processing failure: " << command;
         }
       }
     }
@@ -547,27 +843,144 @@ class PrefetcherDaemon::Impl {
     // Terminate.
   }
 
+  Impl(PrefetcherDaemon* daemon) {
+    session_manager_ = SessionManager::CreateManager(SessionKind::kInProcessDirect);
+    DCHECK(session_manager_ != nullptr);
+  };
+
   ~Impl() {
     // Don't do anything if we never called 'StartViaFork'
     if (forked_) {
       if (!IsDaemon()) {
         int status;
-        waitpid(parent_, /*out*/&status, /*options*/0);
+        waitpid(child_, /*out*/&status, /*options*/0);
       } else {
         DCHECK(false) << "not possible because the execve would avoid this path";
       }
     }
   }
 
-  pid_t parent_;
+  bool SendCommand(const Command& command) {
+    // Only parent is the sender.
+    DCHECK(forked_);
+    //DCHECK(!IsDaemon());
+
+    char buf[1024];
+    size_t stream_size;
+    if (!command.Write(buf, sizeof(buf), /*out*/&stream_size)) {
+      PLOG(ERROR) << "Failed to serialize command: " << command;
+      return false;
+    }
+
+    if (TEMP_FAILURE_RETRY(write(pipefd_write_, buf, stream_size)) < 0) {
+      PLOG(ERROR) << "Failed to write command: " << command;
+      return false;
+    }
+
+    if (LogVerboseIpc()) {
+      LOG(VERBOSE) << "write(fd=" << pipefd_write_ << ", buf=" << buf
+                   << ", size=" << stream_size<< ")";
+    }
+
+    // TODO: also read the reply?
+    return true;
+  }
+
+  bool ReceiveCommand(const Command& command) {
+    // Only child is the command receiver.
+    // DCHECK(IsDaemon());
+
+    switch (command.choice) {
+      case CommandChoice::kRegisterFilePath: {
+        std::shared_ptr<Session> session = session_manager_->FindSession(command.session_id);
+
+        if (!session) {
+          LOG(ERROR) << "ReceiveCommand: Could not find session for command: " << command;
+          return false;
+        }
+
+        CHECK(command.file_path.has_value()) << command;
+        return session->RegisterFilePath(command.id, *command.file_path);
+      }
+      case CommandChoice::kUnregisterFilePath: {
+        std::shared_ptr<Session> session = session_manager_->FindSession(command.session_id);
+
+        if (!session) {
+          LOG(ERROR) << "ReceiveCommand: Could not find session for command: " << command;
+          return false;
+        }
+
+        return session->UnregisterFilePath(command.id);
+      }
+      case CommandChoice::kReadAhead: {
+        std::shared_ptr<Session> session = session_manager_->FindSession(command.session_id);
+
+        if (!session) {
+          LOG(ERROR) << "ReceiveCommand: Could not find session for command: " << command;
+          return false;
+        }
+
+        return session->ReadAhead(command.id, command.read_ahead_kind, command.length, command.offset);
+      }
+      // TODO: unreadahead
+      case CommandChoice::kExit: {
+        LOG(WARNING) << "kExit should be handled earlier.";
+        return true;
+      }
+      case CommandChoice::kCreateSession: {
+        std::shared_ptr<Session> session = session_manager_->FindSession(command.session_id);
+        if (session != nullptr) {
+          LOG(ERROR) << "ReceiveCommand: session for ID already exists: " << command;
+          return false;
+        }
+        CHECK(command.file_path.has_value()) << command;
+        if (session_manager_->CreateSession(command.session_id, /*description*/*command.file_path)
+                == nullptr) {
+          LOG(ERROR) << "ReceiveCommand: Failure to kCreateSession: " << command;
+          return false;
+        }
+        return true;
+      }
+      case CommandChoice::kDestroySession: {
+        if (!session_manager_->DestroySession(command.session_id)) {
+          LOG(ERROR) << "ReceiveCommand: Failure to kDestroySession: " << command;
+          return false;
+        }
+        return true;
+      }
+      case CommandChoice::kDumpSession: {
+        std::shared_ptr<Session> session = session_manager_->FindSession(command.session_id);
+
+        if (!session) {
+          LOG(ERROR) << "ReceiveCommand: Could not find session for command: " << command;
+          return false;
+        }
+
+        // TODO: Consider doing dumpsys support somehow?
+        session->Dump(LOG_STREAM(DEBUG), /*multiline*/true);
+        return true;
+      }
+      case CommandChoice::kDumpEverything: {
+        session_manager_->Dump(LOG_STREAM(DEBUG), /*multiline*/true);
+        break;
+      }
+    }
+
+    // TODO.
+    return true;
+  }
+
+  pid_t child_;
   bool forked_;
   int pipefd_read_;
   int pipefd_write_;
   PrefetcherForkParameters params_;
+  // do not ever use an indirect session manager here, as it would cause a lifetime cycle.
+  std::unique_ptr<SessionManager> session_manager_; // direct only.
 };
 
 PrefetcherDaemon::PrefetcherDaemon()
-  : impl_{new Impl{}} {
+  : impl_{new Impl{this}} {
   LOG(VERBOSE) << "PrefetcherDaemon() constructor";
 }
 
@@ -582,6 +995,10 @@ std::optional<PrefetcherForkParameters> PrefetcherDaemon::StartPipesViaFork() {
 
 bool PrefetcherDaemon::Main(PrefetcherForkParameters params) {
   return impl_->Main(params);
+}
+
+bool PrefetcherDaemon::SendCommand(const Command& command) {
+  return impl_->SendCommand(command);
 }
 
 PrefetcherDaemon::~PrefetcherDaemon() {

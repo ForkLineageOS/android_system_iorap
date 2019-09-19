@@ -15,6 +15,8 @@
 #ifndef PREFETCHER_DAEMON_H_
 #define PREFETCHER_DAEMON_H_
 
+#include "prefetcher/session_manager.h"
+
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -37,24 +39,47 @@ inline std::ostream& operator<<(std::ostream& os, const PrefetcherForkParameters
   return os;
 }
 
+
+#ifndef READ_AHEAD_KIND
+enum class ReadAheadKind : uint32_t {
+  kFadvise = 0,
+  kMmapLocked = 1,
+  kMlock = 2,
+};
+#define READ_AHEAD_KIND 1
+#endif
+
+std::ostream& operator<<(std::ostream& os, ReadAheadKind k);
+
 enum class CommandChoice : uint32_t {
-  kRegisterFilePath,   // kRegisterFilePath <id:uint32> <path:c-string>
-  kUnregisterFilePath, // kUnregisterFilePath <id:uint32>
-  kReadAhead,          // kReadAhead <id:uint32>
+  kRegisterFilePath,   // kRegisterFilePath <sid:uint32> <id:uint32> <path:c-string>
+  kUnregisterFilePath, // kUnregisterFilePath <sid:uint32> <id:uint32>
+  kReadAhead,          // kReadAhead <sid:uint32> <id:uint32> <kind:uint32_t> <length:uint64> <offset:uint64>
   kExit,               // kExit
+  kCreateSession,      // kCreateSession <sid:uint32> <description:c-string>
+  kDestroySession,     // kDestroySession <sid:uint32>
+  kDumpSession,        // kDumpSession <sid:uint32>
+  kDumpEverything,     // kDumpEverything
 };
 
 struct Command {
   CommandChoice choice;
-  uint32_t id;
+  uint32_t session_id;
+  uint32_t id;  // file_path_id
   std::optional<std::string> file_path;  // required for choice=kRegisterFilePath.
+  // also serves as the description for choice=kCreateSession
+
+  // choice=kReadAhead
+  ReadAheadKind read_ahead_kind;
+  uint64_t length;
+  uint64_t offset;
 
   // Deserialize from a char buffer.
   // This can only fail if buf_size is too small.
   static std::optional<Command> Read(char* buf, size_t buf_size, /*out*/size_t* consumed_bytes);
   // Serialize to a char buffer.
   // This can only fail if the buf_size is too small.
-  bool Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes);
+  bool Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) const;
 };
 
 std::ostream& operator<<(std::ostream& os, const Command& command);
@@ -76,6 +101,10 @@ class PrefetcherDaemon {
   //
   // Intended as the execve target.
   bool Main(PrefetcherForkParameters params);
+
+  // Send a command via IPC.
+  // The caller must be the parent process after using StartViaFork.
+  bool SendCommand(const Command& command);
 
  private:
   class Impl;

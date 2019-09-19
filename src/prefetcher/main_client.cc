@@ -13,7 +13,8 @@
 // limitations under the License.
 
 #include "common/debug.h"
-#include "prefetcher/prefetcher_daemon.h"
+#include "prefetcher/read_ahead.h"
+#include "prefetcher/task_id.h"
 
 #include <android-base/parseint.h>
 #include <android-base/logging.h>
@@ -25,27 +26,25 @@
 #include <vector>
 
 #include <signal.h>
+#include <unistd.h>
 
-#if defined(IORAP_PREFETCHER_MAIN)
 
 namespace iorap::prefetcher {
 
-void Usage(char** argv) {
-  std::cerr << "Usage: " << argv[0] << " [--input-fd=#] [--output-fd=#]" << std::endl;
+static void UsageClient(char** argv) {
+  std::cerr << "UsageClient: " << argv[0] << " <path-to-compiled-trace.pb>" << std::endl;
   std::cerr << "" << std::endl;
   std::cerr << "  Run the readahead daemon which can prefetch files given a command." << std::endl;
   std::cerr << "" << std::endl;
   std::cerr << "  Optional flags:" << std::endl;
-  std::cerr << "    --help,-h                  Print this Usage." << std::endl;
-  std::cerr << "    --input-fd,-if             Input FD (default stdin)." << std::endl;
-  std::cerr << "    --output-fd,-of            Output FD (default stdout)." << std::endl;
-  std::cerr << "    --command-format=[text|binary],-cf   (default text)." << std::endl;
+  std::cerr << "    --help,-h                  Print this UsageClient." << std::endl;
   std::cerr << "    --verbose,-v               Set verbosity (default off)." << std::endl;
+  std::cerr << "    --task-duration-ms,-tdm    Set task duration (default: 0ms)." << std::endl;
   std::cerr << "    --wait,-w                  Wait for key stroke before continuing (default off)." << std::endl;
   exit(1);
 }
 
-int Main(int argc, char** argv) {
+int MainClient(int argc, char** argv) {
   android::base::InitLogging(argv);
   android::base::SetLogger(android::base::StderrLogger);
 
@@ -54,9 +53,7 @@ int Main(int argc, char** argv) {
 
   bool command_format_text = false; // false = binary.
 
-  int arg_input_fd = -1;
-  int arg_output_fd = -1;
-
+  unsigned int arg_task_duration_ms = 0;
   std::vector<std::string> arg_input_filenames;
 
   LOG(VERBOSE) << "argparse: argc=" << argc;
@@ -69,42 +66,19 @@ int Main(int argc, char** argv) {
     LOG(VERBOSE) << "argparse: argv[" << arg << "]=" << argstr;
 
     if (argstr == "--help" || argstr == "-h") {
-      Usage(argv);
-    } else if (argstr == "--input-fd" || argstr == "-if") {
-      if (!has_arg_next) {
-        LOG(ERROR) << "--input-fd=<numeric-value>";
-        Usage(argv);
-      }
-      if (!::android::base::ParseInt(arg_next, /*out*/&arg_input_fd)) {
-        LOG(ERROR) << "--input-fd value must be numeric";
-        Usage(argv);
-      }
-    } else if (argstr == "--output-fd" || argstr == "-of") {
-      if (!has_arg_next) {
-        LOG(ERROR) << "--output-fd=<numeric-value>";
-        Usage(argv);
-      }
-      if (!::android::base::ParseInt(arg_next, /*out*/&arg_output_fd)) {
-        LOG(ERROR) << "--output-fd value must be numeric";
-        Usage(argv);
-      }
-    } else if (argstr == "--command-format=" || argstr == "-cf") {
-      if (!has_arg_next) {
-        LOG(ERROR) << "--command-format=text|binary";
-        Usage(argv);
-      }
-      if (arg_next == "text") {
-        command_format_text = true;
-      } else if (arg_next == "binary") {
-        command_format_text = false;
-      } else {
-        LOG(ERROR) << "--command-format must be one of {text,binary}";
-        Usage(argv);
-      }
+      UsageClient(argv);
     } else if (argstr == "--verbose" || argstr == "-v") {
       enable_verbose = true;
     } else if (argstr == "--wait" || argstr == "-w") {
       wait_for_keystroke = true;
+    } else if (argstr == "--task-duration-ms" || argstr == "-tdm") {
+      if (!has_arg_next) {
+        LOG(ERROR) << "--task-duration-ms: requires uint parameter";
+        UsageClient(argv);
+      } else if (!::android::base::ParseUint(arg_next, &arg_task_duration_ms)) {
+        LOG(ERROR) << "--task-duration-ms: requires non-negative parameter";
+        UsageClient(argv);
+      }
     } else {
       arg_input_filenames.push_back(argstr);
     }
@@ -148,25 +122,22 @@ int Main(int argc, char** argv) {
 
   LOG(VERBOSE) << "Hello world";
 
-  if (arg_input_fd == -1) {
-    arg_input_fd = STDIN_FILENO;
-  }
-  if (arg_output_fd == -1) {
-    arg_output_fd = STDOUT_FILENO;
-  }
+  ReadAhead read_ahead;  // Don't count the time it takes to fork+exec.
 
-  PrefetcherForkParameters params{};
-  params.input_fd = arg_input_fd;
-  params.output_fd = arg_output_fd;
-  params.format_text = command_format_text;
+  size_t task_id_counter = 0;
+  for (const std::string& compiled_trace_path : arg_input_filenames) {
+    TaskId task_id{task_id_counter++, compiled_trace_path};
 
-  LOG(VERBOSE) << "main: Starting PrefetcherDaemon: "
-               << "input_fd=" << params.input_fd
-               << ",output_fd=" << params.output_fd;
-  {
-    PrefetcherDaemon daemon;
-    // Blocks until receiving an exit command.
-    daemon.Main(std::move(params));
+    LOG(DEBUG) << "main: ReadAhead BeginTask: "
+                 << "task_duration_ms=" << arg_task_duration_ms << ","
+                 << task_id;
+
+    read_ahead.BeginTask(task_id);
+    usleep(arg_task_duration_ms*1000);
+
+    LOG(DEBUG) << "main: ReadAhead FinishTask: " << task_id;
+
+    read_ahead.FinishTask(task_id);
   }
   LOG(VERBOSE) << "main: Terminating";
 
@@ -177,8 +148,9 @@ int Main(int argc, char** argv) {
 
 }  // namespace iorap::prefetcher
 
+#if defined(IORAP_PREFETCHER_MAIN_CLIENT)
 int main(int argc, char** argv) {
-  return ::iorap::prefetcher::Main(argc, argv);
+  return ::iorap::prefetcher::MainClient(argc, argv);
 }
 
-#endif  // IORAP_PREFETCHER_MAIN
+#endif  // IORAP_PREFETCHER_MAIN_CLIENT
