@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "common/debug.h"
+#include "common/loggers.h"
 #include "prefetcher/prefetcher_daemon.h"
 
 #include <android-base/parseint.h>
@@ -46,8 +47,8 @@ void Usage(char** argv) {
 }
 
 int Main(int argc, char** argv) {
-  android::base::InitLogging(argv);
-  android::base::SetLogger(android::base::StderrLogger);
+  // Go to system logcat + stderr when running from command line.
+  android::base::InitLogging(argv, iorap::common::StderrAndLogdLogger{android::base::SYSTEM});
 
   bool wait_for_keystroke = false;
   bool enable_verbose = false;
