@@ -36,9 +36,12 @@ class ReadAhead {
   // Complete a task, releasing any memory/file descriptors associated with it.
   void FinishTask(const TaskId& id);
 
+  ReadAhead(bool use_sockets);
+
   ReadAhead();
   ~ReadAhead();
  private:
+  void BeginTaskForSockets(const TaskId& id);
   std::unique_ptr<Impl> impl_;
 };
 

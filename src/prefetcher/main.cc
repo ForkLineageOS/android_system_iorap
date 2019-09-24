@@ -40,6 +40,7 @@ void Usage(char** argv) {
   std::cerr << "    --help,-h                  Print this Usage." << std::endl;
   std::cerr << "    --input-fd,-if             Input FD (default stdin)." << std::endl;
   std::cerr << "    --output-fd,-of            Output FD (default stdout)." << std::endl;
+  std::cerr << "    --use-sockets,-us          Use AF_UNIX sockets (default off)." << std::endl;
   std::cerr << "    --command-format=[text|binary],-cf   (default text)." << std::endl;
   std::cerr << "    --verbose,-v               Set verbosity (default off)." << std::endl;
   std::cerr << "    --wait,-w                  Wait for key stroke before continuing (default off)." << std::endl;
@@ -59,6 +60,7 @@ int Main(int argc, char** argv) {
   int arg_output_fd = -1;
 
   std::vector<std::string> arg_input_filenames;
+  bool arg_use_sockets = false;
 
   LOG(VERBOSE) << "argparse: argc=" << argc;
 
@@ -102,6 +104,8 @@ int Main(int argc, char** argv) {
         LOG(ERROR) << "--command-format must be one of {text,binary}";
         Usage(argv);
       }
+    } else if (argstr == "--use-sockets" || argstr == "-us") {
+      arg_use_sockets = true;
     } else if (argstr == "--verbose" || argstr == "-v") {
       enable_verbose = true;
     } else if (argstr == "--wait" || argstr == "-w") {
@@ -160,6 +164,7 @@ int Main(int argc, char** argv) {
   params.input_fd = arg_input_fd;
   params.output_fd = arg_output_fd;
   params.format_text = command_format_text;
+  params.use_sockets = arg_use_sockets;
 
   LOG(VERBOSE) << "main: Starting PrefetcherDaemon: "
                << "input_fd=" << params.input_fd

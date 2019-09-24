@@ -25,8 +25,12 @@
 #include <sstream>
 #include <vector>
 
+#include <fcntl.h>
+#include <string.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace iorap::prefetcher {
@@ -48,6 +52,8 @@ static bool LogVerboseIpc() {
 }
 
 static constexpr const char kCommandFileName[] = "/system/bin/iorap.prefetcherd";
+
+static constexpr size_t kPipeBufferSize = 1024 * 1024;  // matches /proc/sys/fs/pipe-max-size
 
 using ArgString = const char*;
 
@@ -116,6 +122,9 @@ std::ostream& operator<<(std::ostream& os, CommandChoice choice) {
     case CommandChoice::kDumpEverything:
       os << "kDumpEverything";
       break;
+    case CommandChoice::kCreateFdSession:
+      os << "kCreateFdSession";
+      break;
     default:
       CHECK(false) << "forgot to handle this choice";
       break;
@@ -134,6 +143,7 @@ std::ostream& operator<<(std::ostream& os, const Command& command) {
     case CommandChoice::kExit:
       has_session_id = false;
       FALLTHROUGH_INTENDED;
+    case CommandChoice::kCreateFdSession:
     case CommandChoice::kCreateSession:
     case CommandChoice::kDestroySession:
     case CommandChoice::kDumpSession:
@@ -170,6 +180,15 @@ std::ostream& operator<<(std::ostream& os, const Command& command) {
       break;
     case CommandChoice::kExit:
       break;
+    case CommandChoice::kCreateFdSession:
+      os << "fd=";
+      if (command.fd.has_value()) {
+        os << command.fd.value();
+      } else {
+        os << "(nullopt)";
+      }
+      os << ",";
+    FALLTHROUGH_INTENDED;
     case CommandChoice::kCreateSession:
       os << "description=";
       if (command.file_path) {
@@ -286,13 +305,215 @@ class CommandParser {
     params_ = params;
   }
 
-  std::vector<Command> ParseCommands(bool& eof) {
+  std::vector<Command> ParseSocketCommands(bool& eof) {
     eof = false;
 
     std::vector<Command> commands_vec;
 
     std::vector<char> buf_vector;
     buf_vector.resize(1024*1024);  // 1MB.
+    char* buf = &buf_vector[0];
+
+    // Binary only parsing. The higher level code can parse text
+    // with ifstream if it really wants to.
+    char* stream = &buf[0];
+    size_t stream_size = buf_vector.size();
+
+    while (true) {
+      if (stream_size == 0) {
+        // TODO: reply with an overflow command.
+        LOG(WARNING) << "prefetcher_daemon command overflow, dropping all commands.";
+        stream = &buf[0];
+        stream_size = buf_vector.size();
+        memset(&buf[0], /*c*/0, buf_vector.size());
+      }
+
+      if (LogVerboseIpc()) {
+        LOG(VERBOSE) << "PrefetcherDaemon block recvmsg for commands (fd=" << params_.input_fd << ")";
+      }
+
+      ssize_t count;
+      struct msghdr hdr;
+      memset(&hdr, 0, sizeof(hdr));
+
+      {
+        union {
+          struct cmsghdr cmh;
+          char   control[CMSG_SPACE(sizeof(int))];
+        } control_un;
+        memset(&control_un, 0, sizeof(control_un));
+
+        /* Set 'control_un' to describe ancillary data that we want to receive */
+        control_un.cmh.cmsg_len = CMSG_LEN(sizeof(int));  /* fd is sizeof(int) */
+        control_un.cmh.cmsg_level = SOL_SOCKET;
+        control_un.cmh.cmsg_type = SCM_CREDENTIALS;
+
+        // the regular message data will be read into stream
+        struct iovec iov;
+        memset(&iov, 0, sizeof(iov));
+        iov.iov_base = stream;
+        iov.iov_len = stream_size;
+
+        /* Set hdr fields to describe 'control_un' */
+        hdr.msg_control = control_un.control;
+        hdr.msg_controllen = sizeof(control_un.control);
+        hdr.msg_iov = &iov;
+        hdr.msg_iovlen = 1;
+        hdr.msg_name = nullptr; /* no peer address */
+        hdr.msg_namelen = 0;
+
+        count = TEMP_FAILURE_RETRY(recvmsg(params_.input_fd, &hdr, /*flags*/0));
+      }
+
+      if (LogVerboseIpc()) {
+        LOG(VERBOSE) << "PrefetcherDaemon recvmsg " << count << " for stream size:" << stream_size;
+      }
+
+      if (count < 0) {
+        PLOG(ERROR) << "failed to recvmsg from input fd";
+        break;
+        // TODO: let the daemon be restarted by higher level code?
+      } else if (count == 0) {
+        LOG(WARNING) << "prefetcher_daemon input_fd end-of-file; terminating";
+        eof = true;
+        break;
+        // TODO: let the daemon be restarted by higher level code?
+      }
+
+      {
+        /* Extract fd from ancillary data if present */
+        struct cmsghdr* hp;
+        hp = CMSG_FIRSTHDR(&hdr);
+        if (hp                                              &&
+            // FIXME: hp->cmsg_len returns an absurdly large value. is it overflowing?
+            // (hp->cmsg_len == CMSG_LEN(sizeof(int)))          &&
+            (hp->cmsg_level == SOL_SOCKET)                   &&
+            (hp->cmsg_type == SCM_RIGHTS)) {
+
+          int passed_fd = *(int*) CMSG_DATA(hp);
+          if (LogVerboseIpc()) {
+            LOG(VERBOSE) << "PrefetcherDaemon received FD " << passed_fd;
+          }
+
+          // tack the FD into our dequeue.
+          // we assume the FDs are sent in-order same as the regular iov are sent in-order.
+          longbuf_fds_.insert(longbuf_fds_.end(), passed_fd);
+        } else if (hp != nullptr) {
+          if (LogVerboseIpc()) {
+            LOG(VERBOSE) << "PrefetcherDaemon::read got CMSG but it wasn't matching SCM_RIGHTS,"
+                         << "cmsg_len=" << hp->cmsg_len << ","
+                         << "cmsg_level=" << hp->cmsg_level << ","
+                         << "cmsg_type=" << hp->cmsg_type;
+          }
+        }
+      }
+
+      longbuf_.insert(longbuf_.end(), stream, stream + count);
+      if (LogVerboseIpc()) {
+        LOG(VERBOSE) << "PrefetcherDaemon updated longbuf size: " << longbuf_.size();
+      }
+
+      // reconstruct a stream of [iov_Command chdr_fd?]* back into [Command]*
+      {
+        if (longbuf_.size() == 0) {
+          break;
+        }
+
+        std::vector<char> v(longbuf_.begin(),
+                            longbuf_.end());
+
+        std::vector<int> v_fds{longbuf_fds_.begin(), longbuf_fds_.end()};
+
+        if (LogVerboseIpc()) {
+          LOG(VERBOSE) << "PrefetcherDaemon longbuf_ size: " << v.size();
+          if (WOULD_LOG(VERBOSE)) {
+            std::stringstream dump;
+            dump << std::hex << std::setfill('0');
+            for (size_t i = 0; i < v.size(); ++i) {
+              dump << std::setw(2) << static_cast<unsigned>(v[i]);
+            }
+
+            LOG(VERBOSE) << "PrefetcherDaemon longbuf_ dump: " << dump.str();
+          }
+          LOG(VERBOSE) << "PrefetcherDaemon longbuf_fds_ size: " << v_fds.size();
+          if (WOULD_LOG(VERBOSE)) {
+            std::stringstream dump;
+            for (size_t i = 0; i < v_fds.size(); ++i) {
+              dump << v_fds[i] << ", ";
+            }
+
+            LOG(VERBOSE) << "PrefetcherDaemon longbuf_fds_ dump: " << dump.str();
+          }
+
+        }
+
+        size_t v_fds_off = 0;
+        size_t consumed_fds_total = 0;
+
+        size_t v_off = 0;
+        size_t consumed_bytes = std::numeric_limits<size_t>::max();
+        size_t consumed_total = 0;
+
+        while (true) {
+          std::optional<Command> maybe_command;
+          maybe_command = Command::Read(&v[v_off], v.size() - v_off, &consumed_bytes);
+          consumed_total += consumed_bytes;
+          // Normal every time we get to the end of a buffer.
+          if (!maybe_command) {
+              if (LogVerboseIpc()) {
+                LOG(VERBOSE) << "failed to read command, v_off=" << v_off << ",v_size:" << v.size();
+              }
+              break;
+          }
+
+          if (maybe_command->RequiresFd()) {
+            if (v_fds_off < v_fds.size()) {
+              maybe_command->fd = v_fds[v_fds_off++];
+              consumed_fds_total++;
+              if (LogVerboseIpc()) {
+                LOG(VERBOSE) << "Append the FD to " << *maybe_command;
+              }
+            } else {
+              LOG(WARNING) << "Failed to acquire FD for " << *maybe_command;
+            }
+          }
+
+          // in the next pass ignore what we already consumed.
+          v_off += consumed_bytes;
+
+          // true as long we don't hit the 'break' above.
+          DCHECK_EQ(v_off, consumed_total);
+          if (LogVerboseIpc()) {
+            LOG(VERBOSE) << "success to read command, v_off=" << v_off << ",v_size:" << v.size()
+                         << "," << *maybe_command;
+
+            // Pretty-print a single command for debugging/testing.
+            LOG(VERBOSE) << *maybe_command;
+          }
+
+          // add to the commands we parsed.
+          commands_vec.push_back(*maybe_command);
+        }
+
+        // erase however many were consumed
+        longbuf_.erase(longbuf_.begin(), longbuf_.begin() + consumed_total);
+
+        // erase however many FDs were consumed.
+        longbuf_fds_.erase(longbuf_fds_.begin(), longbuf_fds_.begin() + consumed_fds_total);
+      }
+      break;
+    }
+
+    return commands_vec;
+  }
+
+  std::vector<Command> ParseCommands(bool& eof) {
+    eof = false;
+
+    std::vector<Command> commands_vec;
+
+    std::vector<char> buf_vector;
+    buf_vector.resize(kPipeBufferSize);
     char* buf = &buf_vector[0];
 
     // Binary only parsing. The higher level code can parse text
@@ -406,9 +627,12 @@ class CommandParser {
   // A buffer long enough to contain a lot of buffers.
   // This handles reads that only contain a partial command.
   std::deque<char> longbuf_;
+
+  // File descriptor buffers.
+  std::deque<int> longbuf_fds_;
 };
 
-static constexpr bool kDebugCommandRead = false;
+static constexpr bool kDebugCommandRead = true;
 
 #define DEBUG_READ if (kDebugCommandRead) LOG(VERBOSE) << "Command::Read "
 
@@ -512,7 +736,8 @@ std::optional<Command> Command::Read(char* buf, size_t buf_size, /*out*/size_t* 
 
       break;
     }
-    case CommandChoice::kCreateSession: {
+    case CommandChoice::kCreateSession:
+    case CommandChoice::kCreateFdSession: {
       ParseResult<uint32_t> parsed_session_id = ParsingRead<uint32_t>(parsed_choice);
       if (!parsed_session_id) {
         DEBUG_READ << "no parsed session id";
@@ -596,6 +821,7 @@ bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) c
       space_requirement += sizeof(offset);
       break;
     case CommandChoice::kCreateSession:
+    case CommandChoice::kCreateFdSession:
       space_requirement += sizeof(session_id);
       space_requirement += sizeof(uint32_t);    // string length
 
@@ -668,6 +894,7 @@ bool Command::Write(char* buf, size_t buf_size, /*out*/size_t* produced_bytes) c
       buf_offset += sizeof(offset);
       break;
     case CommandChoice::kCreateSession:
+    case CommandChoice::kCreateFdSession:
       memcpy(&buf[buf_offset], &session_id, sizeof(session_id));
       buf_offset += sizeof(session_id);
 
@@ -715,6 +942,22 @@ class PrefetcherDaemon::Impl {
       PLOG(FATAL) << "Failed to create read/write pipes";
     }
 
+    if (WOULD_LOG(VERBOSE)) {
+      long pipe_size = static_cast<long>(fcntl(pipefds[0], F_GETPIPE_SZ));
+      if (pipe_size < 0) {
+        PLOG(ERROR) << "Failed to F_GETPIPE_SZ:";
+      }
+      LOG(VERBOSE) << "StartPipesViaFork: default pipe size: " << pipe_size;
+    }
+
+    for (int i = 0; i < 2; ++i) {
+      // Default pipe size is usually 64KB.
+      // Increase to 1MB so that iorapd has to rarely run during prefetching.
+      if (fcntl(pipefds[i], F_SETPIPE_SZ, kPipeBufferSize) < 0) {
+        PLOG(FATAL) << "Failed to increase pipe size to max";
+      }
+    }
+
     pipefd_read_ = pipefds[0];
     pipefd_write_ = pipefds[1];
 
@@ -722,6 +965,30 @@ class PrefetcherDaemon::Impl {
     params.input_fd = pipefd_read_;
     params.output_fd = pipefd_write_;
     params.format_text = false;
+    params.use_sockets = false;
+
+    bool res = StartViaFork(params);
+    if (res) {
+      return params;
+    } else {
+      return std::nullopt;
+    }
+  }
+
+std::optional<PrefetcherForkParameters> StartSocketViaFork() {
+    int socket_fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, /*protocol*/0, &socket_fds[0]) != 0) {
+      PLOG(FATAL) << "Failed to create read/write socketpair";
+    }
+
+    pipefd_read_ = socket_fds[0];  // iorapd writer, iorap.prefetcherd reader
+    pipefd_write_ = socket_fds[1]; // iorapd reader, iorap.prefetcherd writer
+
+    PrefetcherForkParameters params;
+    params.input_fd = pipefd_read_;
+    params.output_fd = pipefd_write_;
+    params.format_text = false;
+    params.use_sockets = true;
 
     bool res = StartViaFork(params);
     if (res) {
@@ -745,9 +1012,7 @@ class PrefetcherDaemon::Impl {
       return true;
     } else {
       // we are the child that was forked.
-
       std::stringstream argv;  // for logging
-
       std::vector<std::string> argv_vec;
 
       {
@@ -772,6 +1037,15 @@ class PrefetcherDaemon::Impl {
         argv_vec.push_back(s2.str());
 
         argv << " --output-fd" << " " << params.output_fd;
+      }
+
+
+      if (params.use_sockets) {
+        std::stringstream s;
+        s << "--use-sockets";
+        argv_vec.push_back(s.str());
+
+        argv << " --use-sockets";
       }
 
       if (WOULD_LOG(VERBOSE)) {
@@ -813,8 +1087,14 @@ class PrefetcherDaemon::Impl {
 
     while (true) {
       bool eof = false;
-      many_commands = command_parser.ParseCommands(/*out*/eof);
-      sleep(1);
+
+      if (params.use_sockets) {
+        // use recvmsg(2). supports receiving FDs.
+        many_commands = command_parser.ParseSocketCommands(/*out*/eof);
+      } else {
+        // use read(2). does not support receiving FDs.
+        many_commands = command_parser.ParseCommands(/*out*/eof);
+      }
 
       if (eof) {
         LOG(WARNING) << "PrefetcherDaemon got EOF, terminating";
@@ -832,7 +1112,12 @@ class PrefetcherDaemon::Impl {
         }
 
         if (!ReceiveCommand(command)) {
-          LOG(WARNING) << "PrefetcherDaemon command processing failure: " << command;
+          // LOG(WARNING) << "PrefetcherDaemon command processing failure: " << command;
+        }
+
+        // ReceiveCommand should dup to keep the FD. Avoid leaks.
+        if (command.fd.has_value()) {
+          close(*command.fd);
         }
       }
     }
@@ -855,7 +1140,8 @@ class PrefetcherDaemon::Impl {
         int status;
         waitpid(child_, /*out*/&status, /*options*/0);
       } else {
-        DCHECK(false) << "not possible because the execve would avoid this path";
+        LOG(WARNING) << "execve should have avoided this path";
+        // DCHECK(false) << "not possible because the execve would avoid this path";
       }
     }
   }
@@ -872,9 +1158,65 @@ class PrefetcherDaemon::Impl {
       return false;
     }
 
-    if (TEMP_FAILURE_RETRY(write(pipefd_write_, buf, stream_size)) < 0) {
-      PLOG(ERROR) << "Failed to write command: " << command;
-      return false;
+    if (LogVerboseIpc()) {
+      LOG(VERBOSE) << "pre-write(fd=" << pipefd_write_ << ", buf=" << buf
+                   << ", size=" << stream_size<< ")";
+    }
+
+    if (params_.use_sockets) {
+      /* iov contains the normal message (Command) */
+      struct iovec iov;
+      memset(&iov, 0, sizeof(iov));
+      iov.iov_base = &buf[0];
+      iov.iov_len = stream_size;
+
+      struct msghdr msg;
+      memset(&msg, 0, sizeof(msg));
+
+      /* point to iov to transmit */
+      msg.msg_iov = &iov;
+      msg.msg_iovlen = 1;
+
+      /* no dest address; socket is connected */
+      msg.msg_name = nullptr;
+      msg.msg_namelen = 0;
+
+      // append a CMSG with SCM_RIGHTS if we have an FD.
+      if (command.fd.has_value()) {
+          union {
+            struct cmsghdr cmh;
+            char   control[CMSG_SPACE(sizeof(int))]; /* sized to hold an fd (int) */
+          } control_un;
+          memset(&control_un, 0, sizeof(control_un));
+
+          msg.msg_control = &control_un.control[0];
+          msg.msg_controllen = sizeof(control_un.control);
+
+          struct cmsghdr *hp;
+          hp = CMSG_FIRSTHDR(&msg);
+          hp->cmsg_len = CMSG_LEN(sizeof(int));
+          hp->cmsg_level = SOL_SOCKET;
+          hp->cmsg_type = SCM_RIGHTS;
+          *((int *) CMSG_DATA(hp)) = *(command.fd);
+
+          DCHECK(command.RequiresFd()) << command;
+
+          if (LogVerboseIpc()) {
+            LOG(VERBOSE) << "append FD to sendmsg: " << *(command.fd);
+          }
+      }
+
+      // TODO: add CMSG for the FD passage.
+
+      if (TEMP_FAILURE_RETRY(sendmsg(pipefd_write_, &msg, /*flags*/0)) < 0) {
+        PLOG(ERROR) << "Failed to sendmsg command: " << command;
+        return false;
+      }
+    } else {
+      if (TEMP_FAILURE_RETRY(write(pipefd_write_, buf, stream_size)) < 0) {
+        PLOG(ERROR) << "Failed to write command: " << command;
+        return false;
+      }
     }
 
     if (LogVerboseIpc()) {
@@ -964,9 +1306,31 @@ class PrefetcherDaemon::Impl {
         session_manager_->Dump(LOG_STREAM(DEBUG), /*multiline*/true);
         break;
       }
+      case CommandChoice::kCreateFdSession: {
+        std::shared_ptr<Session> session = session_manager_->FindSession(command.session_id);
+        if (session != nullptr) {
+          LOG(ERROR) << "ReceiveCommand: session for ID already exists: " << command;
+          return false;
+        }
+        CHECK(command.file_path.has_value()) << command;
+        CHECK(command.fd.has_value()) << command;
+
+        LOG(VERBOSE) << "ReceiveCommand: kCreateFdSession fd=" << *(command.fd);
+
+        // TODO: Maybe use CreateFdSession instead?
+        session =
+            session_manager_->CreateSession(command.session_id,
+                                            /*description*/*command.file_path,
+                                            command.fd.value());
+        if (session == nullptr) {
+          LOG(ERROR) << "ReceiveCommand: Failure to kCreateFdSession: " << command;
+          return false;
+        }
+
+        return session->ProcessFd(*command.fd);
+      }
     }
 
-    // TODO.
     return true;
   }
 
@@ -991,6 +1355,10 @@ bool PrefetcherDaemon::StartViaFork(PrefetcherForkParameters params) {
 
 std::optional<PrefetcherForkParameters> PrefetcherDaemon::StartPipesViaFork() {
   return impl_->StartPipesViaFork();
+}
+
+std::optional<PrefetcherForkParameters> PrefetcherDaemon::StartSocketViaFork() {
+  return impl_->StartSocketViaFork();
 }
 
 bool PrefetcherDaemon::Main(PrefetcherForkParameters params) {

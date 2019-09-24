@@ -190,6 +190,70 @@ class SessionManagerIndirect : public SessionManagerBase {
   std::shared_ptr<PrefetcherDaemon> daemon_;
 };
 
+class SessionManagerIndirectSocket : public SessionManagerBase {
+ public:
+  virtual std::shared_ptr<Session> CreateSession(size_t session_id,
+                                                 std::string description) override {
+    DCHECK(false) << "not supposed to create a regular session for Socket";
+
+    LOG(VERBOSE) << "CreateSessionIndirect id=" << session_id << ", description=" << description;
+
+    std::shared_ptr<Session> session =
+        std::static_pointer_cast<Session>(std::make_shared<SessionIndirect>(session_id,
+                                                                            description,
+                                                                            daemon_));
+    InsertNewSession(session, description);
+    return session;
+  }
+
+  virtual std::shared_ptr<Session> CreateSession(size_t session_id,
+                                                 std::string description,
+                                                 std::optional<int> fd) override {
+    CHECK(fd.has_value());
+    LOG(VERBOSE) << "CreateSessionIndirectSocket id=" << session_id
+                 << ", description=" << description
+                 << ", fd=" << *fd;
+
+    std::shared_ptr<Session> session =
+        std::static_pointer_cast<Session>(std::make_shared<SessionIndirectSocket>(session_id,
+                                                                                  *fd,
+                                                                                  description,
+                                                                                  daemon_));
+    InsertNewSession(session, description);
+    return session;
+  }
+
+  SessionManagerIndirectSocket() : daemon_{std::make_shared<PrefetcherDaemon>()} {
+    auto params = daemon_->StartSocketViaFork();
+    if (!params) {
+      LOG(FATAL) << "Failed to fork+exec iorap.prefetcherd";
+    }
+  }
+
+  virtual ~SessionManagerIndirectSocket() {
+    Command cmd{};
+    cmd.choice = CommandChoice::kExit;
+
+    if (!daemon_->SendCommand(cmd)) {
+      LOG(FATAL) << "Failed to nicely exit iorap.prefetcherd";
+    }
+  }
+
+  virtual void Dump(std::ostream& os, bool multiline) const override {
+    Command cmd{};
+    cmd.choice = CommandChoice::kDumpEverything;
+
+    if (!daemon_->SendCommand(cmd)) {
+      LOG(ERROR) << "Failed to transmit kDumpEverything to iorap.prefetcherd";
+    }
+  }
+
+
+ private:
+  // No lifetime cycle: PrefetcherDaemon only has a SessionManagerDirect in it.
+  std::shared_ptr<PrefetcherDaemon> daemon_;
+};
+
 std::unique_ptr<SessionManager> SessionManager::CreateManager(SessionKind kind) {
   LOG(VERBOSE) << "SessionManager::CreateManager kind=" << kind;
 
@@ -200,6 +264,10 @@ std::unique_ptr<SessionManager> SessionManager::CreateManager(SessionKind kind) 
     }
     case SessionKind::kOutOfProcessIpc: {
       SessionManager* ptr = new SessionManagerIndirect();
+      return std::unique_ptr<SessionManager>{ptr};
+    }
+    case SessionKind::kOutOfProcessSocket: {
+      SessionManager* ptr = new SessionManagerIndirectSocket();
       return std::unique_ptr<SessionManager>{ptr};
     }
     default: {

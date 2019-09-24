@@ -32,7 +32,7 @@
 namespace iorap::prefetcher {
 
 static void UsageClient(char** argv) {
-  std::cerr << "UsageClient: " << argv[0] << " <path-to-compiled-trace.pb>" << std::endl;
+  std::cerr << "UsageClient: " << argv[0] << " <path-to-compiled-trace.pb> [... pathN]" << std::endl;
   std::cerr << "" << std::endl;
   std::cerr << "  Run the readahead daemon which can prefetch files given a command." << std::endl;
   std::cerr << "" << std::endl;
@@ -40,6 +40,7 @@ static void UsageClient(char** argv) {
   std::cerr << "    --help,-h                  Print this UsageClient." << std::endl;
   std::cerr << "    --verbose,-v               Set verbosity (default off)." << std::endl;
   std::cerr << "    --task-duration-ms,-tdm    Set task duration (default: 0ms)." << std::endl;
+  std::cerr << "    --use-sockets,-us          Use AF_UNIX sockets (default: off)" << std::endl;
   std::cerr << "    --wait,-w                  Wait for key stroke before continuing (default off)." << std::endl;
   exit(1);
 }
@@ -53,8 +54,9 @@ int MainClient(int argc, char** argv) {
 
   bool command_format_text = false; // false = binary.
 
-  unsigned int arg_task_duration_ms = 0;
+  unsigned int arg_task_duration_ms = 10000;
   std::vector<std::string> arg_input_filenames;
+  bool arg_use_sockets = false;
 
   LOG(VERBOSE) << "argparse: argc=" << argc;
 
@@ -67,6 +69,8 @@ int MainClient(int argc, char** argv) {
 
     if (argstr == "--help" || argstr == "-h") {
       UsageClient(argv);
+    } else if (argstr == "--use-sockets" || argstr == "-us") {
+      arg_use_sockets = true;
     } else if (argstr == "--verbose" || argstr == "-v") {
       enable_verbose = true;
     } else if (argstr == "--wait" || argstr == "-w") {
@@ -122,7 +126,7 @@ int MainClient(int argc, char** argv) {
 
   LOG(VERBOSE) << "Hello world";
 
-  ReadAhead read_ahead;  // Don't count the time it takes to fork+exec.
+  ReadAhead read_ahead{arg_use_sockets};  // Don't count the time it takes to fork+exec.
 
   size_t task_id_counter = 0;
   for (const std::string& compiled_trace_path : arg_input_filenames) {

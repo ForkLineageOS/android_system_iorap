@@ -29,6 +29,7 @@
 #include <functional>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unordered_map>
@@ -70,9 +71,7 @@ static PrefetchStrategy GetPrefetchStrategy() {
   if (prefetch_env == "") {
     LOG(VERBOSE)
         << "ReadAhead strategy defaulted. Did you want to set iorapd.readahead.strategy ?";
-    return strat;
-  }
-  if (prefetch_env == "mmap") {
+  } else if (prefetch_env == "mmap") {
     strat = PrefetchStrategy::kMmapLocked;
     LOG(VERBOSE) << "ReadAhead strategy: kMmapLocked";
   } else if (prefetch_env == "mlock") {
@@ -101,11 +100,10 @@ struct TaskData {
   }
 
   std::shared_ptr<Session> session;
-  // std::unordered_map</*path_id*/size_t, FilePathData> path_map;
 };
 
 struct ReadAhead::Impl {
-  Impl() {
+  Impl(bool use_sockets) {
     // Flip this property to test in-process vs out-of-process for the prefetcher code.
     bool out_of_process =
         ::android::base::GetBoolProperty("iorapd.readahead.out_of_process", /*default*/false);
@@ -113,20 +111,30 @@ struct ReadAhead::Impl {
     SessionKind session_kind =
         out_of_process ? SessionKind::kOutOfProcessIpc : SessionKind::kInProcessDirect;
 
+    if (use_sockets) {
+      session_kind = SessionKind::kOutOfProcessSocket;
+    }
+
     session_manager_ = SessionManager::CreateManager(session_kind);
+    session_kind_ = session_kind;
   }
 
   std::unique_ptr<SessionManager> session_manager_;
-
+  SessionKind session_kind_;
   std::unordered_map<size_t /*task index*/, TaskData> read_ahead_file_map_;
+
+  bool UseSockets() const {
+    return session_kind_ == SessionKind::kOutOfProcessSocket;
+  }
 };
 
-ReadAhead::ReadAhead() : impl_(new Impl()) {
+ReadAhead::ReadAhead() : ReadAhead(/*use_sockets*/false) {
+}
+
+ReadAhead::ReadAhead(bool use_sockets) : impl_(new Impl(use_sockets)) {
 }
 
 ReadAhead::~ReadAhead() {}
-
-// static std::unordered_map<size_t /*id*/, ReadAheadMemoryMapList> g_memory_map_list_map_;
 
 static bool PerformReadAhead(std::shared_ptr<Session> session, size_t path_id, ReadAheadKind kind, size_t length, size_t offset) {
   return session->ReadAhead(path_id, kind, length, offset);
@@ -154,11 +162,67 @@ void ReadAhead::FinishTask(const TaskId& id) {
   }
 }
 
+void ReadAhead::BeginTaskForSockets(const TaskId& id) {
+  LOG(VERBOSE) << "BeginTaskForSockets: " << id;
+
+  // TODO: atrace.
+  android::base::Timer timer{};
+  android::base::Timer open_timer{};
+
+  android::base::unique_fd trace_file_fd{
+      TEMP_FAILURE_RETRY(open(id.path.c_str(), /*flags*/O_RDONLY))};
+
+  if (!trace_file_fd.ok()) {
+    PLOG(ERROR) << "ReadAhead failed to open trace file: " << id.path;
+    return;
+  }
+
+  TaskData task_data;
+  task_data.task_id = id;
+
+  std::shared_ptr<Session> session =
+      impl_->session_manager_->CreateSession(task_data.SessionId(),
+                                             /*description*/id.path,
+                                             trace_file_fd.get());
+  task_data.session = session;
+  CHECK(session != nullptr);
+
+  // TODO: maybe getprop and a single line by default?
+  session->Dump(LOG_STREAM(INFO), /*multiline*/true);
+
+  impl_->read_ahead_file_map_[id.id] = std::move(task_data);
+  // FinishTask is identical, as it just destroys the session.
+}
+
 void ReadAhead::BeginTask(const TaskId& id) {
+  {
+    struct timeval now;
+    gettimeofday(&now, nullptr);
+
+    uint64_t now_usec = (now.tv_sec * 1000000LL + now.tv_usec);
+    LOG(DEBUG) << "BeginTask: beginning usec: " << now_usec;
+  }
+
+  if (impl_->UseSockets()) {
+    BeginTaskForSockets(id);
+    return;
+  }
+
   LOG(VERBOSE) << "BeginTask: " << id;
 
   // TODO: atrace.
   android::base::Timer timer{};
+
+  // TODO: refactor this code with SessionDirect::ProcessFd ?
+  TaskData task_data;
+  task_data.task_id = id;
+
+  // Include CreateSession above the Protobuf deserialization so that we can include
+  // the 'total_duration' as part of the Session dump (relevant when we use IPC mode only).
+  std::shared_ptr<Session> session =
+      impl_->session_manager_->CreateSession(task_data.SessionId(),
+                                             /*description*/id.path);
+
   android::base::Timer open_timer{};
 
   // XX: Should we rename all the 'Create' to 'Make', or rename the 'Make' to 'Create' ?
@@ -173,12 +237,6 @@ void ReadAhead::BeginTask(const TaskId& id) {
     return;
   }
 
-  TaskData task_data;
-  task_data.task_id = id;
-
-  std::shared_ptr<Session> session =
-      impl_->session_manager_->CreateSession(task_data.SessionId(),
-                                             /*description*/id.path);
   task_data.session = session;
   CHECK(session != nullptr);
 
@@ -215,6 +273,8 @@ void ReadAhead::BeginTask(const TaskId& id) {
   LOG(VERBOSE) << "ReadAhead: Registered " << count_entries << " file paths";
   std::chrono::milliseconds open_duration_ms = open_timer.duration();
 
+  LOG(DEBUG) << "ReadAhead: Opened file&headers in " << open_duration_ms.count() << "ms";
+
   // Go through every trace entry and readahead every (file,offset,len) tuple.
 
   size_t entry_offset = 0;
@@ -230,7 +290,8 @@ void ReadAhead::BeginTask(const TaskId& id) {
 
     // Attempt to perform readahead. This can generate more warnings dynamically.
     if (!PerformReadAhead(session, file_entry.index_id(), kind, file_entry.file_length(), file_entry.file_offset())) {
-      LOG(WARNING) << "Failed readahead, bad file length/offset in entry @ " << (entry_offset - 1);
+      // TODO: Do we need below at all? The always-on Dump already prints a % of failed entries.
+      // LOG(WARNING) << "Failed readahead, bad file length/offset in entry @ " << (entry_offset - 1);
     }
   }
 
