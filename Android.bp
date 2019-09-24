@@ -62,6 +62,9 @@ cc_defaults {
 
     clang: true,
     shared_libs: ["libbase"],
+
+    // build all ioraps for host.
+    host_supported: true,
 }
 
 cc_defaults {

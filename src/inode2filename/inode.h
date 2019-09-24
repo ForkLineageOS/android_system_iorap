@@ -24,13 +24,27 @@
 namespace iorap::inode2filename {
 
 // Avoid polluting headers.
-#if !defined(__LP64__)
+#if defined(__ANDROID__)
+#  if !defined(__LP64__)
 /* This historical accident means that we had a 32-bit dev_t on 32-bit architectures. */
 using dev_t = uint32_t;
-#else
+#  else
 using dev_t = uint64_t;
-#endif
+#  endif
 using ino_t = unsigned long;
+#else
+#  if !defined(__x86_64__)
+using dev_t = unsigned long long;
+using ino_t = unsigned long long;
+#  else
+using dev_t = unsigned long;
+using ino_t = unsigned long;
+#  endif
+#endif
+
+#ifdef makedev
+#undef makedev
+#endif
 
 /** Combines `major` and `minor` into a device number. */
 constexpr inline dev_t makedev(unsigned int major, unsigned int minor) {
@@ -39,11 +53,19 @@ constexpr inline dev_t makedev(unsigned int major, unsigned int minor) {
       (((minor) & 0xffffff00ULL) << 12) | (((minor) & 0xffULL));
 }
 
+#ifdef major
+#undef major
+#endif
+
 /** Extracts the major part of a device number. */
 constexpr inline unsigned int major(dev_t dev) {
   return
       ((unsigned) ((((unsigned long long) (dev) >> 32) & 0xfffff000) | (((dev) >> 8) & 0xfff)));
 }
+
+#ifdef minor
+#undef minor
+#endif
 
 /** Extracts the minor part of a device number. */
 constexpr inline unsigned int minor(dev_t dev) {
@@ -82,7 +104,7 @@ struct Inode {
   }
 
   static constexpr Inode FromDeviceAndInode(dev_t dev, ino_t inode) {
-    return Inode{major(dev), minor(dev), inode};
+    return Inode{major(dev), minor(dev), static_cast<size_t>(inode)};
   }
 
   constexpr dev_t GetDevice() const {

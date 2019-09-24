@@ -26,7 +26,10 @@ namespace common {
 class StderrAndLogdLogger {
  public:
   explicit StderrAndLogdLogger(android::base::LogId default_log_id = android::base::MAIN)
-    : logd_(default_log_id) {
+#ifdef __ANDROID__
+      : logd_(default_log_id)
+#endif
+  {
   }
 
   void operator()(::android::base::LogId id,
@@ -35,12 +38,16 @@ class StderrAndLogdLogger {
                   const char* file,
                   unsigned int line,
                   const char* message) {
+#ifdef __ANDROID__
     logd_(id, sev, tag, file, line, message);
+#endif
     StderrLogger(id, sev, tag, file, line, message);
   }
 
  private:
+#ifdef __ANDROID__
   ::android::base::LogdLogger logd_;
+#endif
 };
 
 }  // namespace iorap

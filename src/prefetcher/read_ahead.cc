@@ -169,8 +169,10 @@ void ReadAhead::BeginTaskForSockets(const TaskId& id) {
   android::base::Timer timer{};
   android::base::Timer open_timer{};
 
-  android::base::unique_fd trace_file_fd{
-      TEMP_FAILURE_RETRY(open(id.path.c_str(), /*flags*/O_RDONLY))};
+  int trace_file_fd_raw =
+      TEMP_FAILURE_RETRY(open(id.path.c_str(), /*flags*/O_RDONLY));
+
+  android::base::unique_fd trace_file_fd{trace_file_fd_raw};
 
   if (!trace_file_fd.ok()) {
     PLOG(ERROR) << "ReadAhead failed to open trace file: " << id.path;
