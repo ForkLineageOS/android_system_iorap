@@ -219,9 +219,7 @@ struct AppLaunchEventState {
         break;
       }
       case Type::kIntentFailed:
-        if (allowed_tracing_) {
-            AbortTrace();
-        }
+        AbortTrace();
         AbortReadAhead();
         break;
       case Type::kActivityLaunched: {
@@ -232,9 +230,7 @@ struct AppLaunchEventState {
         if (temperature != AppLaunchEvent::Temperature::kCold) {
           LOG(DEBUG) << "AppLaunchEventState#OnNewEvent aborting trace due to non-cold temperature";
 
-          if (allowed_tracing_) {
-            AbortTrace();
-          }
+          AbortTrace();
           AbortReadAhead();
         } else if (!IsTracing() || !IsReadAhead()) {  // and the temperature is Cold.
           // Start late trace when intent didn't have a component name
@@ -277,18 +273,12 @@ struct AppLaunchEventState {
         if (IsTracing()) {
           MarkPendingTrace();
         }
-        if (IsReadAhead()) {
-          FinishReadAhead();
-        }
+        FinishReadAhead();
         break;
       case Type::kActivityLaunchCancelled:
         // Abort tracing.
-        if (allowed_tracing_) {
-          AbortTrace();
-        }
-        if (IsReadAhead()) {
-          AbortReadAhead();
-        }
+        AbortTrace();
+        AbortReadAhead();
         break;
       default:
         DCHECK(false) << "invalid type: " << event;  // binder layer should've rejected this.
@@ -319,7 +309,10 @@ struct AppLaunchEventState {
   }
 
   void FinishReadAhead() {
-    DCHECK(IsReadAhead());
+    // if no readahead task exist, do nothing.
+    if (!IsReadAhead()){
+      return;
+    }
 
     read_ahead_->FinishTask(*read_ahead_task_);
     read_ahead_task_ = std::nullopt;
@@ -397,6 +390,11 @@ struct AppLaunchEventState {
   void AbortTrace() {
     LOG(VERBOSE) << "AppLaunchEventState - AbortTrace";
     DCHECK(allowed_tracing_);
+
+    // if the tracing is not running, do nothing.
+    if (!IsTracing()){
+      return;
+    }
 
     is_tracing_ = false;
     if (rx_lifetime_) {
