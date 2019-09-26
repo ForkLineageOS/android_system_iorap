@@ -616,7 +616,6 @@ bool BinaryWireProtobuf<T>::ReadFdToString(int fd, /*out*/std::vector<std::byte>
 template struct BinaryWireProtobuf<::google::protobuf::MessageLite>;
 // TODO: refactor this not to need the template instantiation.
 
-#if defined(__ANDROID__)
 // Copy of the 2.6.18 kernel header (linux/ioprio.h)
 
 #define IOPRIO_WHO_PROCESS (1)
@@ -629,7 +628,6 @@ template struct BinaryWireProtobuf<::google::protobuf::MessageLite>;
 #define IOPRIO_PRIO_CLASS(mask)	((mask) >> IOPRIO_CLASS_SHIFT)
 #define IOPRIO_PRIO_DATA(mask)	((mask) & IOPRIO_PRIO_MASK)
 #define IOPRIO_PRIO_VALUE(class, data)	(((class) << IOPRIO_CLASS_SHIFT) | data)
-#endif
 
 static int ioprio_get(int which, int who) {
   return syscall(SYS_ioprio_get, which, who);
