@@ -42,6 +42,7 @@ struct AppLaunchEvent : public ::android::Parcelable {
     kActivityLaunched = 2,
     kActivityLaunchFinished = 3,
     kActivityLaunchCancelled = 4,
+    kReportFullyDrawn = 5,
   };
 
   enum class Temperature : int32_t {
@@ -59,6 +60,8 @@ struct AppLaunchEvent : public ::android::Parcelable {
   Temperature temperature{Temperature::kUninitialized};
   // kActivityLaunch*. Can be null in kActivityLaunchCancelled.
   std::unique_ptr<ActivityRecordProto> activity_record_proto;
+  // kReportFullyDrawn only.
+  int64_t timestamp_nanos{-1};
 
   AppLaunchEvent() = default;
   AppLaunchEvent(Type type,
@@ -92,6 +95,7 @@ struct AppLaunchEvent : public ::android::Parcelable {
     switch (type) {
       case Type::kIntentStarted:
         PARCEL_READ_OR_RETURN(readIntent, parcel);
+        PARCEL_READ_OR_RETURN(parcel->readInt64, &timestamp_nanos);
         break;
       case Type::kIntentFailed:
         // No extra arguments.
@@ -105,9 +109,14 @@ struct AppLaunchEvent : public ::android::Parcelable {
       }
       case Type::kActivityLaunchFinished:
         PARCEL_READ_OR_RETURN(readActivityRecordProto, parcel);
+        PARCEL_READ_OR_RETURN(parcel->readInt64, &timestamp_nanos);
         break;
       case Type::kActivityLaunchCancelled:
         PARCEL_READ_OR_RETURN(readActivityRecordProtoNullable, parcel);
+        break;
+      case Type::kReportFullyDrawn:
+        PARCEL_READ_OR_RETURN(readActivityRecordProto, parcel);
+        PARCEL_READ_OR_RETURN(parcel->readInt64, &timestamp_nanos);
         break;
       default:
         return android::BAD_VALUE;
@@ -131,6 +140,7 @@ struct AppLaunchEvent : public ::android::Parcelable {
     switch (type) {
       case Type::kIntentStarted:
         PARCEL_WRITE_OR_RETURN(writeIntent, parcel);
+        PARCEL_WRITE_OR_RETURN(parcel->writeInt64, timestamp_nanos);
         break;
       case Type::kIntentFailed:
         // No extra arguments.
@@ -141,9 +151,14 @@ struct AppLaunchEvent : public ::android::Parcelable {
         break;
       case Type::kActivityLaunchFinished:
         PARCEL_WRITE_OR_RETURN(writeActivityRecordProto, parcel);
+        PARCEL_WRITE_OR_RETURN(parcel->writeInt64, timestamp_nanos);
         break;
       case Type::kActivityLaunchCancelled:
         PARCEL_WRITE_OR_RETURN(writeActivityRecordProtoNullable, parcel);
+        break;
+      case Type::kReportFullyDrawn:
+        PARCEL_WRITE_OR_RETURN(writeActivityRecordProtoNullable, parcel);
+        PARCEL_WRITE_OR_RETURN(parcel->writeInt64, timestamp_nanos);
         break;
       default:
         DCHECK(false) << "attempted to write an uninitialized AppLaunchEvent to Parcel";
@@ -320,6 +335,9 @@ inline std::ostream& operator<<(std::ostream& os, const AppLaunchEvent::Type& ty
     case AppLaunchEvent::Type::kActivityLaunchFinished:
       os << "kActivityLaunchFinished";
       break;
+    case AppLaunchEvent::Type::kReportFullyDrawn:
+      os << "kReportFullyDrawn";
+      break;
     default:
       os << "(unknown)";
   }
@@ -378,6 +396,11 @@ inline std::ostream& operator<<(std::ostream& os, const AppLaunchEvent& e) {
     // title or component name.
     os << "'" << e.activity_record_proto->identifier().title() << "'";
   }
+  os << ",";
+
+  os << "timestamp_nanos=" << e.timestamp_nanos << ",";
+  os << ",";
+
   os << "}";
 
   return os;

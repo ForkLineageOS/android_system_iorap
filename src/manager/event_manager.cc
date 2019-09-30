@@ -198,6 +198,9 @@ struct AppLaunchEventState {
         AbortTrace();
         AbortReadAhead();
         break;
+      case Type::kReportFullyDrawn:
+        // TODO(yawanng) add handling of this event.
+        break;
       default:
         DCHECK(false) << "invalid type: " << event;  // binder layer should've rejected this.
         LOG(ERROR) << "invalid type: " << event;  // binder layer should've rejected this.
