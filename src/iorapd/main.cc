@@ -17,6 +17,7 @@
 #include "binder/iiorap_impl.h"
 #include "common/debug.h"
 #include "common/loggers.h"
+#include "db/models.h"
 #include "manager/event_manager.h"
 
 #include <android-base/logging.h>
@@ -37,10 +38,17 @@ int main(int /*argc*/, char** argv) {
   // Logs go to system logcat.
   android::base::InitLogging(argv, iorap::common::StderrAndLogdLogger{android::base::SYSTEM});
 
+  LOG(INFO) << kServiceName << " (the prefetchening) firing up";
   {
-    android::ScopedTrace trace_main{ATRACE_TAG_PACKAGE_MANAGER, "main"};
-    LOG(INFO) << kServiceName << " (the prefetchening) firing up";
+    android::ScopedTrace trace_db_init{ATRACE_TAG_PACKAGE_MANAGER, "IorapNativeService::db_init"};
+    iorap::db::SchemaModel db_schema =
+        iorap::db::SchemaModel::GetOrCreate(
+            android::base::GetProperty("iorapd.db.location",
+                                       "/data/misc/iorapd/sqlite.db"));
+    db_schema.MarkSingleton();
+  }
 
+  {
     android::ScopedTrace trace_start{ATRACE_TAG_PACKAGE_MANAGER, "IorapNativeService::start"};
 
     // TODO: use fruit for this DI.
