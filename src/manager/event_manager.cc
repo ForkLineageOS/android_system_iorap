@@ -16,6 +16,7 @@
 
 #include "common/debug.h"
 #include "common/expected.h"
+#include "common/rx_async.h"
 #include "db/app_component_name.h"
 #include "db/models.h"
 #include "manager/event_manager.h"
@@ -38,6 +39,9 @@ using binder::AppLaunchEvent;
 using binder::JobScheduledEvent;
 using binder::RequestId;
 using binder::TaskResult;
+
+using common::AsyncPool;
+using common::RxAsync;
 
 using perfetto::PerfettoStreamCommand;
 using perfetto::PerfettoTraceProto;
@@ -73,12 +77,14 @@ struct AppLaunchEventState {
   borrowed<perfetto::RxProducerFactory*> perfetto_factory_;  // not null
   borrowed<observe_on_one_worker*> thread_;  // not null
   borrowed<observe_on_one_worker*> io_thread_;  // not null
+  borrowed<AsyncPool*> async_pool_;  // not null
 
   explicit AppLaunchEventState(borrowed<perfetto::RxProducerFactory*> perfetto_factory,
                                bool allowed_readahead,
                                bool allowed_tracing,
                                borrowed<observe_on_one_worker*> thread,
-                               borrowed<observe_on_one_worker*> io_thread)
+                               borrowed<observe_on_one_worker*> io_thread,
+                               borrowed<AsyncPool*> async_pool)
     : read_ahead_{std::make_shared<prefetcher::ReadAhead>()}
   {
     perfetto_factory_ = perfetto_factory;
@@ -92,6 +98,9 @@ struct AppLaunchEventState {
 
     io_thread_ = io_thread;
     DCHECK(io_thread_ != nullptr);
+
+    async_pool_ = async_pool;
+    DCHECK(async_pool_ != nullptr);
   }
 
   // Updates the values in this struct only as a side effect.
@@ -277,7 +286,7 @@ struct AppLaunchEventState {
 
     rxcpp::composite_subscription lifetime;
 
-    trace_proto_stream
+    auto stream_via_threads = trace_proto_stream
       .tap([](const PerfettoTraceProto& trace_proto) {
              LOG(VERBOSE) << "StartTracing -- PerfettoTraceProto received (1)";
            })
@@ -286,9 +295,10 @@ struct AppLaunchEventState {
       .observe_on(*io_thread_)  // Write data on an idle-class-priority thread.
       .tap([](const PerfettoTraceProto& trace_proto) {
              LOG(VERBOSE) << "StartTracing -- PerfettoTraceProto received (2)";
-           })
-      .as_blocking()  // TODO: remove.
-      .subscribe(/*out*/lifetime,
+           });
+
+    lifetime = RxAsync::SubscribeAsync(*async_pool_,
+        std::move(stream_via_threads),
         /*on_next*/[component_name]
         (PerfettoTraceProto trace_proto) {
           std::string file_path = "/data/misc/iorapd/";
@@ -320,8 +330,13 @@ struct AppLaunchEventState {
     if (rx_lifetime_) {
       // TODO: it would be good to call perfetto Destroy.
 
+      std::remove(rx_in_flight_.begin(),
+                  rx_in_flight_.end(),
+                  *rx_lifetime_);
+
       LOG(VERBOSE) << "AppLaunchEventState - AbortTrace - Unsubscribe";
       rx_lifetime_->unsubscribe();
+
       rx_lifetime_.reset();
     }
   }
@@ -541,6 +556,10 @@ class EventManager::Impl {
     callbacks_ = callbacks;
   }
 
+  void Join() {
+    async_pool_.Join();
+  }
+
   bool OnAppLaunchEvent(RequestId request_id,
                         const AppLaunchEvent& event) {
     LOG(VERBOSE) << "EventManager::OnAppLaunchEvent("
@@ -583,7 +602,8 @@ class EventManager::Impl {
                                       readahead_allowed_,
                                       tracing_allowed_,
                                       &worker_thread2_,
-                                      &io_thread_};
+                                      &io_thread_,
+                                      &async_pool_};
     app_launch_events_
       .subscribe_on(worker_thread_)
       .scan(std::move(initial_state),
@@ -701,6 +721,8 @@ class EventManager::Impl {
   observe_on_one_worker worker_thread2_;
   // low priority idle-class thread for IO operations.
   observe_on_one_worker io_thread_;
+  // async futures pool for async rx operations.
+  AsyncPool async_pool_;
 
   rxcpp::composite_subscription rx_lifetime_;  // app launch events
   rxcpp::composite_subscription rx_lifetime_jobs_;  // job scheduled events
@@ -736,6 +758,10 @@ std::shared_ptr<EventManager> EventManager::Create(perfetto::RxProducerFactory& 
 
 void EventManager::SetTaskResultCallbacks(std::shared_ptr<TaskResultCallbacks> callbacks) {
   return impl_->SetTaskResultCallbacks(std::move(callbacks));
+}
+
+void EventManager::Join() {
+  return impl_->Join();
 }
 
 bool EventManager::OnAppLaunchEvent(RequestId request_id,
