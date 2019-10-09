@@ -503,6 +503,7 @@ void SessionDirect::Dump(std::ostream& os, bool multiline) const {
     os << "Session Direct (id=" << SessionId() << ")" << std::endl;
 
     os << "  Summary: " << std::endl;
+    os << "    Description = " << SessionDescription() << std::endl;
     os << "    Duration = " << timer_.duration().count() << "ms" << std::endl;
     os << "    Total File Paths=" << path_count << " (good: " << good_fd_rate << "%)" << std::endl;
     os << "    Total Entries=" << overall_entry_count;
