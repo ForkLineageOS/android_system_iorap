@@ -127,10 +127,12 @@ cc_defaults {
     static_libs: [
         "libiorap-perfetto",
         "libiorap-prefetcher",
+        "libiorap-db",
     ],
     defaults: [
         "libiorap-perfetto-default-dependencies",
         "libiorap-prefetcher-default-dependencies",
+        "libiorap-db-default-dependencies",
     ],
     // Users of 'libiorap-manager' also need to include these defaults to avoid
     // linking errors.
@@ -503,6 +505,68 @@ cc_binary {
   // Easier debugging. TODO: make a separate debug config.
   // XX: Using -O0 seems to completely hide some errors.
   cflags: ["-O2", "-UNDEBUG", "-DIORAP_PREFETCHER_MAIN_CLIENT=1"],
+  sanitize: {
+    undefined: true,
+    all_undefined: true,
+    // Pretty print when ubsan detects a problem.
+    // Otherwise it just calls abort().
+
+/*
+    diag: {
+      undefined: true,
+    },
+    */ // don't use the diag when you want it to crash.
+  },
+
+  static_libs: [
+  ],
+}
+
+// Static libraries cannot export their dependencies,
+// the current convention is to use an extra 'defaults' rule for statics
+// to bring in all the dependencies.
+cc_defaults {
+    name: "libiorap-db-default-dependencies",
+
+    defaults: [
+    ],
+
+    include_dirs: [],
+    static_libs: [
+    ],
+    shared_libs: [
+        "libsqlite",
+    ],
+}
+
+cc_library_static {
+    name: "libiorap-db",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+        "libiorap-db-default-dependencies",
+    ],
+
+    srcs: [
+        "src/db/**/*.cc",
+    ],
+}
+
+cc_binary {
+  name: "iorap.cmd.db",
+  defaults: [
+      "iorap-default-flags",
+      "iorap-default-dependencies",
+      "libiorap-db-default-dependencies",
+  ],
+  shared_libs: [],
+  include_dirs: [],
+  srcs: [
+      "src/db/**/*.cc",
+  ],
+  // Easier debugging. TODO: make a separate debug config.
+  // XX: Using -O0 seems to completely hide some errors.
+  cflags: ["-O2", "-UNDEBUG", "-DIORAP_DB_MAIN=1"],
   sanitize: {
     undefined: true,
     all_undefined: true,

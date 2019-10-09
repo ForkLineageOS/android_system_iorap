@@ -16,6 +16,8 @@
 
 #include "common/debug.h"
 #include "common/expected.h"
+#include "db/app_component_name.h"
+#include "db/models.h"
 #include "manager/event_manager.h"
 #include "perfetto/rx_producer.h"
 #include "prefetcher/read_ahead.h"
@@ -26,6 +28,7 @@
 
 #include <atomic>
 #include <functional>
+#include <utils/Trace.h>
 
 using rxcpp::observe_on_one_worker;
 
@@ -39,98 +42,7 @@ using binder::TaskResult;
 using perfetto::PerfettoStreamCommand;
 using perfetto::PerfettoTraceProto;
 
-struct AppComponentName {
-  std::string package;
-  std::string activity_name;
-
-  static bool HasAppComponentName(const std::string& s) {
-    return s.find('/') != std::string::npos;
-  }
-
-  // "com.foo.bar/.A" -> {"com.foo.bar", ".A"}
-  static AppComponentName FromString(const std::string& s) {
-    constexpr const char delimiter = '/';
-    std::string package = s.substr(0, delimiter);
-
-    std::string activity_name = s;
-    activity_name.erase(0, s.find(delimiter) + sizeof(delimiter));
-
-    return {std::move(package), std::move(activity_name)};
-  }
-
-  // {"com.foo.bar", ".A"} -> "com.foo.bar/.A"
-  std::string ToString() const {
-    return package + "/" + activity_name;
-  }
-
-  /*
-   * '/' is encoded into %2F
-   * '%' is encoded into %25
-   *
-   * This allows the component name to be be used as a file name
-   * ('/' is illegal due to being a path separator) with minimal
-   * munging.
-   */
-
-  // "com.foo.bar%2F.A%25" -> {"com.foo.bar", ".A%"}
-  static AppComponentName FromUrlEncodedString(const std::string& s) {
-    std::string cpy = s;
-    Replace(cpy, "%2F", "/");
-    Replace(cpy, "%25", "%");
-
-    return FromString(cpy);
-  }
-
-  // {"com.foo.bar", ".A%"} -> "com.foo.bar%2F.A%25"
-  std::string ToUrlEncodedString() const {
-    std::string s = ToString();
-    Replace(s, "%", "%25");
-    Replace(s, "/", "%2F");
-    return s;
-  }
-
-  /*
-   * '/' is encoded into @@
-   * '%' is encoded into ^^
-   *
-   * Two purpose:
-   * 1. This allows the pacakge name to be used as a file name
-   * ('/' is illegal due to being a path separator) with minimal
-   * munging.
-   * 2. This allows the package name to be used in .mk file because
-   * '%' is a special char and cannot be easily escaped in Makefile.
-   *
-   * This is a workround for test purpose.
-   * Only package name is used because activity name varies on
-   * diffferent testing framework.
-   * Hopefully, the double "@@" and "^^" are not used in other cases.
-   */
-  // {"com.foo.bar", ".A%"} -> "com.foo.bar"
-  std::string ToMakeFileSafeEncodedPkgString() const {
-    std::string s = package;
-    Replace(s, "/", "@@");
-    Replace(s, "%", "^^");
-    return s;
-  }
-
- private:
-  static bool Replace(std::string& str, const std::string& from, const std::string& to) {
-    // TODO: call in a loop to replace all occurrences, not just the first one.
-    const size_t start_pos = str.find(from);
-    if (start_pos == std::string::npos) {
-      return false;
-    }
-
-    str.replace(start_pos, from.length(), to);
-
-    return true;
-}
-};
-
-std::ostream& operator<<(std::ostream& os, const AppComponentName& name) {
-  os << name.ToString();
-  return os;
-}
+using db::AppComponentName;
 
 // Main logic of the #OnAppLaunchEvent scan method.
 //
@@ -144,6 +56,7 @@ struct AppLaunchEventState {
   // Sequence ID is shared amongst the same app launch sequence,
   // but changes whenever a new app launch sequence begins.
   size_t sequence_id_ = static_cast<size_t>(-1);
+  std::optional<AppLaunchEvent::Temperature> temperature_;
 
   // labeled as 'shared' due to rx not being able to handle move-only objects.
   // lifetime: in practice equivalent to unique_ptr.
@@ -188,6 +101,9 @@ struct AppLaunchEventState {
   void OnNewEvent(const AppLaunchEvent& event) {
     LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent: " << event;
 
+    android::ScopedTrace trace_db_init{ATRACE_TAG_PACKAGE_MANAGER,
+                                       "IorapNativeService::OnAppLaunchEvent"};
+
     using Type = AppLaunchEvent::Type;
 
     DCHECK_GE(event.sequence_id, 0);
@@ -227,6 +143,7 @@ struct AppLaunchEventState {
         // Restart tracing if the activity was unexpected.
 
         AppLaunchEvent::Temperature temperature = event.temperature;
+        temperature_ = temperature;
         if (temperature != AppLaunchEvent::Temperature::kCold) {
           LOG(DEBUG) << "AppLaunchEventState#OnNewEvent aborting trace due to non-cold temperature";
 
@@ -266,6 +183,7 @@ struct AppLaunchEventState {
         break;
       }
       case Type::kActivityLaunchFinished:
+        RecordDbLaunchHistory();
         // Finish tracing and collect trace buffer.
         //
         // TODO: this happens automatically when perfetto finishes its
@@ -425,6 +343,48 @@ struct AppLaunchEventState {
     }
 
     // FIXME: how do we clear this vector?
+  }
+
+  void RecordDbLaunchHistory() {
+    // TODO: deferred queue into a different lower priority thread.
+    if (!component_name_ || !temperature_) {
+      LOG(VERBOSE) << "Skip RecordDbLaunchHistory, no component name available.";
+      return;
+    }
+
+    android::ScopedTrace trace{ATRACE_TAG_PACKAGE_MANAGER,
+                               "IorapNativeService::RecordDbLaunchHistory"};
+    db::DbHandle db{db::SchemaModel::GetSingleton()};
+
+    using namespace iorap::db;
+
+    std::optional<ActivityModel> activity =
+        ActivityModel::SelectOrInsert(db,
+                                      component_name_->package,
+                                      /*version*/std::nullopt,
+                                      component_name_->activity_name);
+
+    if (!activity) {
+      LOG(WARNING) << "Failed to query activity row for : " << *component_name_;
+      return;
+    }
+
+    auto temp = static_cast<db::AppLaunchHistoryModel::Temperature>(*temperature_);
+
+    std::optional<AppLaunchHistoryModel> alh =
+        AppLaunchHistoryModel::Insert(db,
+                                      activity->id,
+                                      temp,
+                                      IsTracing(),
+                                      IsReadAhead(),
+                                      /*total_time_ns*/std::nullopt,
+                                      /*report_fully_drawn_ns*/std::nullopt);
+    if (!alh) {
+      LOG(WARNING) << "Failed to insert app_launch_histories row";
+      return;
+    }
+
+    LOG(VERBOSE) << "RecordDbLaunchHistory: " << *alh;
   }
 };
 
