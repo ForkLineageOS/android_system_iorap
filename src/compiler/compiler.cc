@@ -33,6 +33,7 @@
 #include <iostream>
 #include <fstream>
 #include <optional>
+#include <utility>
 
 #include <sched.h>
 #include <sys/types.h>
@@ -50,45 +51,82 @@ using SearchDirectories = iorap::inode2filename::SearchDirectories;
 template <typename T>
 using ProtobufPtr = iorap::perfetto::ProtobufPtr<T>;
 
+struct PerfettoTraceProtoInfo {
+  /* The perfetto trace proto. */
+  ::iorap::perfetto::PerfettoTraceProto proto;
+  /*
+   * The timestamp limit of the trace.
+   * It's used to truncate the trace file.
+   */
+  uint64_t timestamp_limit_ns;
+};
+
+struct PerfettoTracePtrInfo {
+  /* Deserialized protobuf data containing the perfetto trace. */
+  ProtobufPtr<::perfetto::protos::Trace> trace_ptr;
+  /*
+   * The timestamp limit of the trace.
+   * It's used to truncate the trace file.
+   */
+  uint64_t timestamp_limit_ns;
+};
+
+struct  PerfettoTraceFileInfo {
+  /* The name of the perfetto trace. */
+  std::string filename;
+  /*
+   * The timestamp limit of the trace.
+   * It's used to truncate the trace file.
+   */
+  uint64_t timestamp_limit_ns;
+};
+
 // Attempt to read protobufs from the filenames.
 // Emits one (or none) protobuf for each filename, in the same order as the filenames.
 // On any errors, the items are dropped (errors are written to the error LOG).
 //
 // All work is done on the same Coordinator as the Subscriber.
 template <typename ProtoT /*extends MessageLite*/>
-auto/*observable<ProtoT>*/ ReadProtosFromFileNames(rxcpp::observable<std::string> filenames) {
-  // using BinaryWireProtoT = ::iorap::perfetto::BinaryWireProtobuf<ProtoT>;
+auto/*observable<PerfettoTracePtrInfo>*/ ReadProtosFromFileNames(
+    rxcpp::observable<PerfettoTraceFileInfo> file_infos) {
   using BinaryWireProtoT = ::iorap::perfetto::PerfettoTraceProto;
 
-  return filenames
-    .map([](const std::string& filename) {
-      LOG(VERBOSE) << "compiler::ReadProtosFromFileNames " << filename << " [begin]";
+  return file_infos
+    .map([](const PerfettoTraceFileInfo& file_info) ->
+         std::optional<PerfettoTraceProtoInfo> {
+      LOG(VERBOSE) << "compiler::ReadProtosFromFileNames " << file_info.filename
+                   << " TimeStampLimit "<< file_info.timestamp_limit_ns << " [begin]";
       std::optional<BinaryWireProtoT> maybe_proto =
-          BinaryWireProtoT::ReadFullyFromFile(filename);
+          BinaryWireProtoT::ReadFullyFromFile(file_info.filename);
       if (!maybe_proto) {
-        LOG(ERROR) << "Failed to read file: " << filename;
+        LOG(ERROR) << "Failed to read file: " << file_info.filename;
+        return std::nullopt;
       }
-      return maybe_proto;
+      return {{std::move(maybe_proto.value()), file_info.timestamp_limit_ns}};
     })
-    .filter([](const std::optional<BinaryWireProtoT>& proto) {
-      return proto.has_value();
+    .filter([](const std::optional<PerfettoTraceProtoInfo>& proto_info) {
+      return proto_info.has_value();
     })
-    .map([](std::optional<BinaryWireProtoT> proto) -> BinaryWireProtoT {
-      return std::move(proto.value());
+    .map([](std::optional<PerfettoTraceProtoInfo>& proto_info) ->
+         PerfettoTraceProtoInfo {
+      return proto_info.value();
     })  // TODO: refactor to something that flattens the optional, and logs in one operator.
-    .map([](BinaryWireProtoT proto) {
-      std::optional<ProtobufPtr<ProtoT>> t = proto.template MaybeUnserialize<ProtoT>();
+    .map([](PerfettoTraceProtoInfo& proto_info) ->
+         std::optional<PerfettoTracePtrInfo> {
+      std::optional<ProtobufPtr<ProtoT>> t = proto_info.proto.template MaybeUnserialize<ProtoT>();
       if (!t) {
         LOG(ERROR) << "Failed to parse protobuf: ";  // TODO: filename.
+        return std::nullopt;
       }
-      return t;
+      return {{std::move(t.value()), proto_info.timestamp_limit_ns}};
     })
-    .filter([](const std::optional<ProtobufPtr<ProtoT>>& proto) {
-      return proto.has_value();
+    .filter([](const std::optional<PerfettoTracePtrInfo>& trace_info) {
+      return trace_info.has_value();
     })
-    .map([](std::optional<ProtobufPtr<ProtoT>> proto) -> ProtobufPtr<ProtoT> {
+    .map([](std::optional<PerfettoTracePtrInfo>& trace_info) ->
+         PerfettoTracePtrInfo {
       LOG(VERBOSE) << "compiler::ReadProtosFromFileNames [success]";
-      return std::move(proto.value());
+      return trace_info.value();
       // TODO: protobufs have no move constructor. this might be inefficient?
     });
 
@@ -129,10 +167,10 @@ auto/*observable<ProtoT>*/ ReadProtosFromFileNames(rxcpp::observable<std::string
     */
 }
 
-auto/*observable<::perfetto::protos::Trace>*/ ReadPerfettoTraceProtos(
-    std::vector<std::string> filenames) {
-  auto filename_obs = rxcpp::observable<>::iterate(std::move(filenames));
-  rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> obs =
+auto/*observable<PerfettoTracePtrInfo>*/ ReadPerfettoTraceProtos(
+    std::vector<PerfettoTraceFileInfo> file_infos) {
+  auto filename_obs = rxcpp::observable<>::iterate(std::move(file_infos));
+  rxcpp::observable<PerfettoTracePtrInfo> obs =
       ReadProtosFromFileNames<::perfetto::protos::Trace>(std::move(filename_obs));
   return obs;
 }
@@ -228,13 +266,14 @@ std::ostream& operator<<(std::ostream& os, const PageCacheFtraceEvent& e) {
  */
 
 auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
-    ProtobufPtr<::perfetto::protos::Trace> trace_ptr) {
-  const ::perfetto::protos::Trace& trace = *trace_ptr;
+    PerfettoTracePtrInfo trace_info) {
+  const ::perfetto::protos::Trace& trace = *(trace_info.trace_ptr);
 
   constexpr bool kDebugFunction = true;
 
   return rxcpp::observable<>::create<PageCacheFtraceEvent>(
-      [trace=std::move(trace)](rxcpp::subscriber<PageCacheFtraceEvent> sub) {
+      [trace=std::move(trace), timestamp_limit_ns=trace_info.timestamp_limit_ns]
+      (rxcpp::subscriber<PageCacheFtraceEvent> sub) {
     uint64_t timestamp = 0;
     uint64_t timestamp_relative = 0;
 
@@ -292,6 +331,11 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
           if (event.has_timestamp()) {
             timestamp_relative_start = timestamp_relative_start.value_or(event.timestamp());
             timestamp = event.timestamp();
+            if(timestamp > timestamp_limit_ns) {
+              LOG(VERBOSE) << "The timestamp is " << timestamp <<
+                           ", which exceeds the limit "<< timestamp_limit_ns;
+              continue;
+            }
           } else {
             DCHECK(packet.has_timestamp() == false)
                 << "Timestamp in outer packet but not inner packet";
@@ -375,10 +419,10 @@ auto /*observable<PageCacheFtraceEvent>*/ SelectPageCacheFtraceEvents(
 }
 
 auto /*observable<Inode*/ SelectDistinctInodesFromTraces(
-    rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> traces) {
+    rxcpp::observable<PerfettoTracePtrInfo> traces) {
   // Emit only unique (s_dev, i_ino) pairs from all Trace protos.
   auto obs = traces
-    .flat_map([](ProtobufPtr<::perfetto::protos::Trace> trace) {
+    .flat_map([](PerfettoTracePtrInfo trace) {
       rxcpp::observable<PageCacheFtraceEvent> obs = SelectPageCacheFtraceEvents(std::move(trace));
       // FIXME: dont check this in
       // return obs;
@@ -506,7 +550,7 @@ std::ostream& operator<<(std::ostream& os, const CombinedState& s) {
 }
 
 auto/*observable<ResolvedPageCacheFtraceEvent>*/ ResolvePageCacheEntriesFromProtos(
-    rxcpp::observable<ProtobufPtr<::perfetto::protos::Trace>> traces,
+    rxcpp::observable<PerfettoTracePtrInfo> traces,
     inode2filename::InodeResolverDependencies dependencies) {
 
   // 1st chain = emits exactly 1 InodeMap.
@@ -522,7 +566,7 @@ auto/*observable<ResolvedPageCacheFtraceEvent>*/ ResolvePageCacheEntriesFromProt
 
   // 2nd chain = emits all PageCacheFtraceEvent
   auto/*observable<PageCacheFtraceEvent>*/ page_cache_ftrace_events = traces
-    .flat_map([](ProtobufPtr<::perfetto::protos::Trace> trace) {
+    .flat_map([](PerfettoTracePtrInfo trace) {
       rxcpp::observable<PageCacheFtraceEvent> obs = SelectPageCacheFtraceEvents(std::move(trace));
       return obs;
     });
@@ -761,14 +805,35 @@ auto/*observable<CompilerPageCacheEvent>*/ CompilePageCacheEvents(
       //return rxcpp::sources::iterate(std::move(ts_set));
       return rxcpp::sources::iterate(ts_set).map([](CompilerPageCacheEvent e) { return e; });
     }
-  );    // observable<CompilerPageCacheEvent>
+  );   // observable<CompilerPageCacheEvent>
+}
+
+/** Builds a vector of info that includes filename and timestamp limit. */
+std::vector<PerfettoTraceFileInfo> BuildPerfettoTraceFileInfos(
+    std::vector<std::string> input_file_names,
+    std::vector<uint64_t> timestamp_limit_ns){
+  // If the timestamp limit is empty, set the limit to max value
+  // for each trace file.
+  if (timestamp_limit_ns.empty()) {
+    for (size_t i = 0; i < input_file_names.size(); i++) {
+      timestamp_limit_ns.push_back(std::numeric_limits<uint64_t>::max());
+    }
+  }
+  DCHECK_EQ(input_file_names.size(), timestamp_limit_ns.size());
+  std::vector<PerfettoTraceFileInfo> file_infos;
+  for (size_t i = 0; i < input_file_names.size(); i++) {
+    file_infos.push_back({input_file_names[i], timestamp_limit_ns[i]});
+  }
+  return file_infos;
 }
 
 bool PerformCompilation(std::vector<std::string> input_file_names,
+                        std::vector<uint64_t> timestamp_limit_ns,
                         std::string output_file_name,
                         bool output_proto,
                         inode2filename::InodeResolverDependencies dependencies) {
-  auto trace_protos = ReadPerfettoTraceProtos(std::move(input_file_names));
+  auto file_infos = BuildPerfettoTraceFileInfos(input_file_names, timestamp_limit_ns);
+  auto trace_protos = ReadPerfettoTraceProtos(std::move(file_infos));
   auto resolved_events = ResolvePageCacheEntriesFromProtos(std::move(trace_protos),
                                                            std::move(dependencies));
   auto compiled_events = CompilePageCacheEvents(std::move(resolved_events));
