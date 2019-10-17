@@ -22,6 +22,7 @@
 #include <string>
 #include <sstream>
 #include <type_traits>
+#include <vector>
 
 #include <sqlite3.h>
 
@@ -112,6 +113,7 @@ class DbStatement {
     return db_;
   }
 
+  // Successive BindAll calls *do not* start back at the 0th bind position.
   template <typename T, typename ... Args>
   void BindAll(T&& arg, Args&&... args) {
     Bind(std::forward<T>(arg));
@@ -177,10 +179,13 @@ class DbStatement {
     return true;
   }
 
+  // Successive ColumnAll calls start at the 0th column again.
   template <typename T, typename ... Args>
   void ColumnAll(T& first, Args&... rest) {
     Column(first);
     ColumnAll(rest...);
+    // Reset column counter back to 0
+    column_counter_ = 0;
   }
 
   void ColumnAll() {}
@@ -221,6 +226,15 @@ class DbStatement {
 
   void Column(std::string& value) {
     const unsigned char* text = sqlite3_column_text(stmt_, column_counter_++);
+
+    DCHECK(text != nullptr) << "Column should be marked NOT NULL, otherwise use optional<string>";
+    if (text == nullptr) {
+      LOG(ERROR) << "Got NULL back for column " << column_counter_-1
+                 << "; is this column marked NOT NULL?";
+      value = "(((null)))";  // Don't segfault, keep going.
+      return;
+    }
+
     value = std::string{reinterpret_cast<const char*>(text)};
   }
 
@@ -290,6 +304,20 @@ class DbQueryBuilder {
     DCHECK_GT(last_rowid, 0);
 
     return static_cast<int>(last_rowid);
+  }
+
+  // Returns the row ID that was inserted last.
+  template <typename... Args>
+  static bool Delete(DbHandle db, const std::string& sql, Args&&... args) {
+    ScopedLockDb lock{db};
+
+    DbStatement stmt = DbStatement::Prepare(db, sql, std::forward<Args>(args)...);
+
+    if (!stmt.Step(SQLITE_DONE)) {
+      return false;
+    }
+
+    return true;
   }
 
   template <typename... Args>
@@ -752,6 +780,76 @@ inline std::ostream& operator<<(std::ostream& os, const AppLaunchHistoryModel& p
     os << "(nullopt)";
   }
   os << "}";
+  return os;
+}
+
+class RawTraceModel : public Model {
+ protected:
+  RawTraceModel(DbHandle db) : Model{db} {
+  }
+
+ public:
+
+  // Return raw_traces, sorted ascending by the id.
+  static std::vector<RawTraceModel> SelectByPackageNameActivityName(DbHandle db,
+                                                                    std::string package_name,
+                                                                    std::string activity_name) {
+    ScopedLockDb lock{db};
+
+    const char* sql =
+      "SELECT raw_traces.id, raw_traces.history_id, raw_traces.file_path "
+      "FROM raw_traces "
+      "INNER JOIN app_launch_histories ON raw_traces.history_id = app_launch_histories.id "
+      "INNER JOIN activities ON activities.id = app_launch_histories.activity_id "
+      "INNER JOIN packages ON packages.id = activities.package_id "
+      "WHERE packages.name = ? AND activities.name = ? "
+      "ORDER BY raw_traces.id ASC";
+
+    DbStatement stmt = DbStatement::Prepare(db, sql, package_name, activity_name);
+
+    std::vector<RawTraceModel> results;
+
+    RawTraceModel p{db};
+    while (DbQueryBuilder::SelectOnce(stmt, p.id, p.history_id, p.file_path)) {
+      results.push_back(p);
+    }
+
+    return results;
+  }
+
+  static std::optional<RawTraceModel> Insert(DbHandle db,
+                                             int history_id,
+                                             std::string file_path) {
+    const char* sql = "INSERT INTO raw_traces (history_id, file_path) VALUES (?1, ?2);";
+
+    std::optional<int> inserted_row_id =
+        DbQueryBuilder::Insert(db, sql, history_id, file_path);
+    if (!inserted_row_id) {
+      return std::nullopt;
+    }
+
+    RawTraceModel p{db};
+    p.id = *inserted_row_id;
+    p.history_id = history_id;
+    p.file_path = file_path;
+
+    return p;
+  }
+
+  bool Delete() {
+    const char* sql = "DELETE FROM raw_traces WHERE id = ?";
+
+    return DbQueryBuilder::Delete(db(), sql, id);
+  }
+
+  int id;
+  int history_id;
+  std::string file_path;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const RawTraceModel& p) {
+  os << "RawTraceModel{id=" << p.id << ",history_id=" << p.history_id << ",";
+  os << "file_path=" << p.file_path << "}";
   return os;
 }
 

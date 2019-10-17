@@ -587,6 +587,14 @@ std::optional<BinaryWireProtobuf<T>> BinaryWireProtobuf<T>::ReadFullyFromFile(
 }
 
 template <typename T>
+bool BinaryWireProtobuf<T>::operator==(const BinaryWireProtobuf<T>& other) const {
+  if (data_.size() != other.data_.size()) {
+    return false;
+  }
+  return std::equal(data_.begin(), data_.end(), other.data_.begin());
+}
+
+template <typename T>
 bool BinaryWireProtobuf<T>::ReadFdToString(int fd, /*out*/std::vector<std::byte>* content) {
   DCHECK(content != nullptr);
 
