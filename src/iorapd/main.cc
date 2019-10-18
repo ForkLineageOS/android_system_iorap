@@ -48,18 +48,20 @@ int main(int /*argc*/, char** argv) {
     db_schema.MarkSingleton();
   }
 
+  std::shared_ptr<iorap::manager::EventManager> event_manager;
   {
     android::ScopedTrace trace_start{ATRACE_TAG_PACKAGE_MANAGER, "IorapNativeService::start"};
 
     // TODO: use fruit for this DI.
-    auto /*std::shared_ptr<EventManager>*/ event_manager =
+    event_manager =
         iorap::manager::EventManager::Create();
-    if (!iorap::binder::IIorapImpl::Start(std::move(event_manager))) {
+    if (!iorap::binder::IIorapImpl::Start(event_manager)) {
       LOG(ERROR) << "Unable to start IorapNativeService";
       exit(1);
     }
   }
 
+  event_manager->Join();  // TODO: shutdown somewhere?
   // Block until something else shuts down the binder service.
   android::IPCThreadState::self()->joinThreadPool();
   LOG(INFO) << kServiceName << " shutting down";

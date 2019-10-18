@@ -53,6 +53,9 @@ class EventManager {
       /*borrow*/perfetto::RxProducerFactory& perfetto_factory);
   void SetTaskResultCallbacks(std::shared_ptr<TaskResultCallbacks> callbacks);
 
+  // Joins any background threads created by EventManager.
+  void Join();
+
   // Handles an AppLaunchEvent:
   //
   // * Intent starts and app launch starts are treated critically

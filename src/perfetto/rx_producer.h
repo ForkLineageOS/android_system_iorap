@@ -134,6 +134,11 @@ struct BinaryWireProtobuf {
   static std::optional<BinaryWireProtobuf<T>> ReadFullyFromFile(const std::string& path,
                                                                 bool follow_symlinks = false);
 
+  bool operator==(const BinaryWireProtobuf<T>& other) const;
+  bool operator!=(const BinaryWireProtobuf<T>& other) const {
+    return !(*this == other);
+  }
+
  private:
   static bool CleanUpAfterFailedWrite(const std::string& path);
   bool WriteStringToFd(int fd) const;
