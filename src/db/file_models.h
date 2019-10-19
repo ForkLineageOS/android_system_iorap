@@ -109,6 +109,19 @@ class PerfettoTraceFileModel : public FileModelBase {
   uint64_t timestamp_;
 };
 
+class CompiledTraceFileModel : public FileModelBase {
+ protected:
+  virtual std::string ModelName() const override { return "CompiledTrace"; }
+  virtual std::string SubDir() const override { return "compiled_traces"; }
+  virtual std::string BaseFile() const override;
+
+  CompiledTraceFileModel(VersionedComponentName vcn);
+
+ public:
+  static CompiledTraceFileModel CalculateNewestFilePath(VersionedComponentName vcn);
+
+  virtual ~CompiledTraceFileModel() {}
+};
 
 }   // namespace iorap::db
 

@@ -550,6 +550,21 @@ class PackageModel : public Model {
     return p;
   }
 
+  static std::vector<PackageModel> SelectAll(DbHandle db) {
+    ScopedLockDb lock{db};
+
+    std::string query = "SELECT * FROM packages;";
+    DbStatement stmt = DbStatement::Prepare(db, query);
+
+    std::vector<PackageModel> packages;
+    PackageModel p{db};
+    while (DbQueryBuilder::SelectOnce(stmt, p.id, p.name, p.version)) {
+      packages.push_back(p);
+    }
+
+    return packages;
+  }
+
   static std::optional<PackageModel> Insert(DbHandle db,
                                             std::string name,
                                             std::optional<int> version) {
@@ -621,6 +636,22 @@ class ActivityModel : public Model {
     }
 
     return p;
+  }
+
+  static std::vector<ActivityModel> SelectByPackageId(DbHandle db,
+                                                      int package_id) {
+    ScopedLockDb lock{db};
+
+    std::string query = "SELECT * FROM activities WHERE package_id = ?;";
+    DbStatement stmt = DbStatement::Prepare(db, query, package_id);
+
+    std::vector<ActivityModel> activities;
+    ActivityModel p{db};
+    while (DbQueryBuilder::SelectOnce(stmt, p.id, p.name, p.package_id)) {
+      activities.push_back(p);
+    }
+
+    return activities;
   }
 
   static std::optional<ActivityModel> Insert(DbHandle db,
@@ -711,6 +742,37 @@ class AppLaunchHistoryModel : public Model {
     }
 
     return p;
+  }
+
+  // Selects the activity history for an activity id.
+  // The requirements are:
+  // * Should be cold run.
+  // * Pefetto trace is enabled.
+  // * intent_start_ns is *NOT* null.
+  static std::vector<AppLaunchHistoryModel> SelectActivityHistoryForCompile(
+      DbHandle db,
+      int activity_id) {
+    ScopedLockDb lock{db};
+    std::string query = "SELECT * FROM app_launch_histories "
+                        "WHERE activity_id = ?1 AND"
+                        "  temperature = 1 AND"
+                        "  trace_enabled = TRUE"
+                        "  intent_started_ns != NULL;";
+    DbStatement stmt = DbStatement::Prepare(db, query, activity_id);
+    std::vector<AppLaunchHistoryModel> result;
+
+    AppLaunchHistoryModel p{db};
+    while (DbQueryBuilder::SelectOnce(stmt,
+                                      p.id,
+                                      p.activity_id,
+                                      p.temperature,
+                                      p.trace_enabled,
+                                      p.readahead_enabled,
+                                      p.total_time_ns,
+                                      p.report_fully_drawn_ns)) {
+      result.push_back(p);
+    }
+    return result;
   }
 
   static std::optional<AppLaunchHistoryModel> Insert(DbHandle db,
@@ -817,6 +879,25 @@ class RawTraceModel : public Model {
     return results;
   }
 
+  static std::optional<RawTraceModel> SelectByHistoryId(DbHandle db, int history_id) {
+    ScopedLockDb lock{db};
+
+    const char* sql =
+      "SELECT id, history_id, file_path "
+      "FROM raw_traces "
+      "WHERE history_id = ?1 "
+      "LIMIT 1;";
+
+    DbStatement stmt = DbStatement::Prepare(db, sql, history_id);
+
+    RawTraceModel p{db};
+    if (!DbQueryBuilder::SelectOnce(stmt, p.id, p.history_id, p.file_path)) {
+      return std::nullopt;
+    }
+
+    return p;
+  }
+
   static std::optional<RawTraceModel> Insert(DbHandle db,
                                              int history_id,
                                              std::string file_path) {
@@ -849,6 +930,48 @@ class RawTraceModel : public Model {
 
 inline std::ostream& operator<<(std::ostream& os, const RawTraceModel& p) {
   os << "RawTraceModel{id=" << p.id << ",history_id=" << p.history_id << ",";
+  os << "file_path=" << p.file_path << "}";
+  return os;
+}
+
+class PrefetchFileModel : public Model {
+ protected:
+  PrefetchFileModel(DbHandle db) : Model{db} {
+  }
+
+ public:
+  static std::optional<PrefetchFileModel> Insert(DbHandle db,
+                                                 int activity_id,
+                                                 std::string file_path) {
+    const char* sql = "INSERT INTO prefetch_files (activity_id, file_path) VALUES (?1, ?2);";
+
+    std::optional<int> inserted_row_id =
+        DbQueryBuilder::Insert(db, sql, activity_id, file_path);
+    if (!inserted_row_id) {
+      return std::nullopt;
+    }
+
+    PrefetchFileModel p{db};
+    p.id = *inserted_row_id;
+    p.activity_id = activity_id;
+    p.file_path = file_path;
+
+    return p;
+  }
+
+  bool Delete() {
+    const char* sql = "DELETE FROM prefetch_files WHERE id = ?";
+
+    return DbQueryBuilder::Delete(db(), sql, id);
+  }
+
+  int id;
+  int activity_id;
+  std::string file_path;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const PrefetchFileModel& p) {
+  os << "PrefetchFileModel{id=" << p.id << ",activity_id=" << p.activity_id << ",";
   os << "file_path=" << p.file_path << "}";
   return os;
 }

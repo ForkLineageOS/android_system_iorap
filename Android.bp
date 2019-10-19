@@ -613,3 +613,60 @@ cc_binary {
   static_libs: [
   ],
 }
+
+cc_defaults {
+    name: "libiorap-maintenance-default-dependencies",
+
+    defaults: [
+        "libiorap-compiler-default-dependencies",
+        "libiorap-db-default-dependencies",
+    ],
+
+    include_dirs: [],
+
+    static_libs: [
+        "libc++fs",
+        "libiorap-compiler",
+        "libiorap-db",
+    ],
+
+    shared_libs: []
+}
+
+cc_library_static {
+    name: "libiorap-maintenance",
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+        "libiorap-maintenance-default-dependencies",
+    ],
+
+    srcs: [
+        "src/maintenance/*.cc",
+    ],
+}
+
+cc_binary {
+  name: "iorap.cmd.maintenance",
+  defaults: [
+      "iorap-default-flags",
+      "iorap-default-dependencies",
+      "libiorap-maintenance-default-dependencies",
+  ],
+  shared_libs: [],
+  include_dirs: [],
+  srcs: [
+      "src/maintenance/*.cc",
+  ],
+  cflags: ["-O2", "-UNDEBUG", "-DIORAP_MAINTENANCE_MAIN=1"],
+  sanitize: {
+    undefined: true,
+    all_undefined: true,
+
+    diag: {
+      undefined: true,
+    },
+  },
+
+  static_libs: [],
+}

@@ -161,4 +161,16 @@ void PerfettoTraceFileModel::DeleteOlderFiles(DbHandle& db, VersionedComponentNa
   }
 }
 
+CompiledTraceFileModel::CompiledTraceFileModel(VersionedComponentName vcn)
+  : FileModelBase{std::move(vcn)} {
+}
+
+CompiledTraceFileModel CompiledTraceFileModel::CalculateNewestFilePath(VersionedComponentName vcn) {
+  return CompiledTraceFileModel{vcn};
+}
+
+std::string CompiledTraceFileModel::BaseFile() const {
+  return "compiled_trace.pb";
+}
+
 }  // namespace iorap::db
