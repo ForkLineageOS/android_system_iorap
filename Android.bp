@@ -218,14 +218,45 @@ cc_test {
     defaults: [
         "iorap-default-flags",
         "iorap-default-dependencies",
+        "libiorap-compiler-default-dependencies",
     ],
     srcs: [
-        "tests/src/**/*.cc",
+        "tests/src/binder/*.cc",
+        "tests/src/inode2filename/*.cc",
+        "tests/src/log/*.cc",
+        "tests/src/tmp/*.cc",
+    ],
+    data: [
+        "tests/src/compiler/testdata/*",
     ],
     cflags: ["-O2", "-UNDEBUG"],
 
     // TODO:  we should probably have per-component tests.
     static_libs: ["libgmock_main", "libgmock", "libgtest", "libiorap-inode2filename"],
+
+}
+
+
+cc_test_host {
+    name: "iorapd-host-tests",
+    test_suites: ["general-tests"],
+    gtest: false,  // we use gtest *and* gmock.
+    defaults: [
+        "iorap-default-flags",
+        "iorap-default-dependencies",
+        "libiorap-compiler-default-dependencies",
+    ],
+    srcs: [
+        "tests/src/compiler/*.cc",
+    ],
+    data: [
+        "tests/src/compiler/testdata/*",
+    ],
+    cflags: ["-O2", "-UNDEBUG"],
+
+    // TODO:  we should probably have per-component tests.
+    static_libs: ["libgmock_main", "libgmock", "libgtest", "libiorap-compiler"],
+
 }
 
 filegroup {

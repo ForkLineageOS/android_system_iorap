@@ -22,7 +22,11 @@
 
 namespace iorap::compiler {
 // Compile one or more perfetto TracePacket protobufs that are stored on the filesystem
-// by the filenames given with `input_file_names`.
+// by the filenames given with `input_file_names` and timestamp limit given with
+// timestamp_limit_ns.
+//
+// For each input file name and timestamp limit, ignore any events from the input that
+// exceed the associated timestamp limit.
 //
 // The result is stored into the file path specified by `output_file_name`.
 //
@@ -31,6 +35,7 @@ namespace iorap::compiler {
 //
 // Operation is transactional -- that is if there is a failure, `output_file_name` is untouched.
 bool PerformCompilation(std::vector<std::string> input_file_names,
+                        std::vector<uint64_t> timestamp_limit_ns,
                         std::string output_file_name,
                         bool output_proto,
                         inode2filename::InodeResolverDependencies dependencies);
