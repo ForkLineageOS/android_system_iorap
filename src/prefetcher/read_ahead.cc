@@ -143,7 +143,7 @@ static bool PerformReadAhead(std::shared_ptr<Session> session, size_t path_id, R
 void ReadAhead::FinishTask(const TaskId& id) {
   auto it = impl_->read_ahead_file_map_.find(id.id);
   if (it == impl_->read_ahead_file_map_.end()) {
-    LOG(ERROR) << "Could not find any TaskData for " << id;
+    LOG(DEBUG) << "Could not find any TaskData for " << id;
     return;
   }
 
@@ -235,7 +235,7 @@ void ReadAhead::BeginTask(const TaskId& id) {
   if (trace_file_ptr == nullptr) {
     // TODO: distinguish between missing trace (this is OK, most apps wont have one)
     // and a bad error.
-    LOG(ERROR) << "ReadAhead failed, missing trace file? " << id.path;
+    LOG(DEBUG) << "ReadAhead could not start, missing trace file? " << id.path;
     return;
   }
 

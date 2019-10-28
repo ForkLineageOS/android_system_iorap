@@ -36,7 +36,7 @@ ArenaPtr<proto::TraceFile> ProtobufIO::Open(std::string file_path) {
   // Note: can't use {} here, clang think it's narrowing from long->int.
   android::base::unique_fd fd(TEMP_FAILURE_RETRY(::open(file_path.c_str(), O_RDONLY)));
   if (fd.get() < 0) {
-    PLOG(ERROR) << "ProtobufIO: open failed: " << file_path;
+    PLOG(DEBUG) << "ProtobufIO: open failed: " << file_path;
     return nullptr;
   }
 
