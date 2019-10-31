@@ -72,7 +72,7 @@ TEST_F(CompilerTest, SingleTraceDuration) {
   EXPECT_EQ(result, true);
   EXPECT_EQ(content, "{filename:\"/product/app/CalculatorGooglePrebuilt/"
             "CalculatorGooglePrebuilt.apk\","
-            "timestamp:260390390001566,"
+            "timestamp:7641303,"
             "add_to_page_cache:1,"
             "index:540}\n");
 }
@@ -95,15 +95,15 @@ TEST_F(CompilerTest, MultiTraceDuration) {
     std::istreambuf_iterator<char>()};
 
   EXPECT_EQ(result, true);
-  EXPECT_EQ(content, "{filename:\"/product/app/CalculatorGooglePrebuilt/"
+  EXPECT_EQ(content, "{filename:\"/apex/com.android.art/lib64/libperfetto_hprof.so\","
+            "timestamp:4388958,"
+            "add_to_page_cache:1,"
+            "index:227}\n"
+            "{filename:\"/product/app/CalculatorGooglePrebuilt/"
             "CalculatorGooglePrebuilt.apk\","
-            "timestamp:260390390001566,"
+            "timestamp:7641303,"
             "add_to_page_cache:1,"
-            "index:540}\n"
-            "{filename:\"/apex/com.android.art/lib64/libperfetto_hprof.so\","
-            "timestamp:333215840452006,"
-            "add_to_page_cache:1,"
-            "index:227}\n");
+            "index:540}\n");
 }
 
 TEST_F(CompilerTest, NoTraceDuration) {
