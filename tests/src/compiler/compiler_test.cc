@@ -57,8 +57,10 @@ TEST_F(CompilerTest, SingleTraceDuration) {
   char* output_file_name = tmp_file.path;
   bool output_proto = false;
 
-  bool result = PerformCompilation(input_file_names,
-                                   timestamp_limit_ns,
+
+  std::vector<CompilationInput> perfetto_traces =
+      MakeCompilationInputs(input_file_names, timestamp_limit_ns);
+  bool result = PerformCompilation(perfetto_traces,
                                    output_file_name,
                                    output_proto,
                                    ir_dependencies);
@@ -85,8 +87,9 @@ TEST_F(CompilerTest, MultiTraceDuration) {
   char* output_file_name = tmp_file.path;
   bool output_proto = false;
 
-  bool result = PerformCompilation(input_file_names,
-                                   timestamp_limit_ns,
+  std::vector<CompilationInput> perfetto_traces =
+      MakeCompilationInputs(input_file_names, timestamp_limit_ns);
+  bool result = PerformCompilation(perfetto_traces,
                                    output_file_name,
                                    output_proto,
                                    ir_dependencies);
@@ -112,8 +115,9 @@ TEST_F(CompilerTest, NoTraceDuration) {
   char* output_file_name = tmp_file.path;
   bool output_proto = false;
 
-  bool result = PerformCompilation(input_file_names,
-                                   /* timestamp_limit_ns= */{},
+  std::vector<CompilationInput> perfetto_traces =
+      MakeCompilationInputs(input_file_names, /* timestamp_limit_ns= */{});
+  bool result = PerformCompilation(perfetto_traces,
                                    output_file_name,
                                    output_proto,
                                    ir_dependencies);
