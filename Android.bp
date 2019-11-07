@@ -239,7 +239,6 @@ cc_test {
 
 cc_test_host {
     name: "iorapd-host-tests",
-    test_suites: ["general-tests"],
     gtest: false,  // we use gtest *and* gmock.
     defaults: [
         "iorap-default-flags",
