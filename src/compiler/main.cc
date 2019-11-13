@@ -160,9 +160,10 @@ int Main(int argc, char** argv) {
   ir_dependencies.system_call = /*borrowed*/system_call.get();
 
   int return_code = 0;
+  std::vector<CompilationInput> perfetto_traces =
+      MakeCompilationInputs(arg_input_filenames, timestamp_limit_ns);
   return_code =
-      !PerformCompilation(std::move(arg_input_filenames),
-                          timestamp_limit_ns,
+      !PerformCompilation(std::move(perfetto_traces),
                           std::move(arg_output_proto),
                           !arg_output_text,
                           std::move(ir_dependencies));

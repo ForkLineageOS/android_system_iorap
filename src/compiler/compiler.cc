@@ -71,16 +71,6 @@ struct PerfettoTracePtrInfo {
   uint64_t timestamp_limit_ns;
 };
 
-struct  PerfettoTraceFileInfo {
-  /* The name of the perfetto trace. */
-  std::string filename;
-  /*
-   * The timestamp limit of the trace.
-   * It's used to truncate the trace file.
-   */
-  uint64_t timestamp_limit_ns;
-};
-
 // Attempt to read protobufs from the filenames.
 // Emits one (or none) protobuf for each filename, in the same order as the filenames.
 // On any errors, the items are dropped (errors are written to the error LOG).
@@ -88,11 +78,11 @@ struct  PerfettoTraceFileInfo {
 // All work is done on the same Coordinator as the Subscriber.
 template <typename ProtoT /*extends MessageLite*/>
 auto/*observable<PerfettoTracePtrInfo>*/ ReadProtosFromFileNames(
-    rxcpp::observable<PerfettoTraceFileInfo> file_infos) {
+    rxcpp::observable<CompilationInput> file_infos) {
   using BinaryWireProtoT = ::iorap::perfetto::PerfettoTraceProto;
 
   return file_infos
-    .map([](const PerfettoTraceFileInfo& file_info) ->
+    .map([](const CompilationInput& file_info) ->
          std::optional<PerfettoTraceProtoInfo> {
       LOG(VERBOSE) << "compiler::ReadProtosFromFileNames " << file_info.filename
                    << " TimeStampLimit "<< file_info.timestamp_limit_ns << " [begin]";
@@ -168,7 +158,7 @@ auto/*observable<PerfettoTracePtrInfo>*/ ReadProtosFromFileNames(
 }
 
 auto/*observable<PerfettoTracePtrInfo>*/ ReadPerfettoTraceProtos(
-    std::vector<PerfettoTraceFileInfo> file_infos) {
+    std::vector<CompilationInput> file_infos) {
   auto filename_obs = rxcpp::observable<>::iterate(std::move(file_infos));
   rxcpp::observable<PerfettoTracePtrInfo> obs =
       ReadProtosFromFileNames<::perfetto::protos::Trace>(std::move(filename_obs));
@@ -801,8 +791,8 @@ auto/*observable<CompilerPageCacheEvent>*/ CompilePageCacheEvents(
   );   // observable<CompilerPageCacheEvent>
 }
 
-/** Builds a vector of info that includes filename and timestamp limit. */
-std::vector<PerfettoTraceFileInfo> BuildPerfettoTraceFileInfos(
+/** Makes a vector of info that includes filename and timestamp limit. */
+std::vector<CompilationInput> MakeCompilationInputs(
     std::vector<std::string> input_file_names,
     std::vector<uint64_t> timestamp_limit_ns){
   // If the timestamp limit is empty, set the limit to max value
@@ -813,20 +803,18 @@ std::vector<PerfettoTraceFileInfo> BuildPerfettoTraceFileInfos(
     }
   }
   DCHECK_EQ(input_file_names.size(), timestamp_limit_ns.size());
-  std::vector<PerfettoTraceFileInfo> file_infos;
+  std::vector<CompilationInput> file_infos;
   for (size_t i = 0; i < input_file_names.size(); i++) {
     file_infos.push_back({input_file_names[i], timestamp_limit_ns[i]});
   }
   return file_infos;
 }
 
-bool PerformCompilation(std::vector<std::string> input_file_names,
-                        std::vector<uint64_t> timestamp_limit_ns,
+bool PerformCompilation(std::vector<CompilationInput> perfetto_traces,
                         std::string output_file_name,
                         bool output_proto,
                         inode2filename::InodeResolverDependencies dependencies) {
-  auto file_infos = BuildPerfettoTraceFileInfos(input_file_names, timestamp_limit_ns);
-  auto trace_protos = ReadPerfettoTraceProtos(std::move(file_infos));
+  auto trace_protos = ReadPerfettoTraceProtos(std::move(perfetto_traces));
   auto resolved_events = ResolvePageCacheEntriesFromProtos(std::move(trace_protos),
                                                            std::move(dependencies));
   auto compiled_events = CompilePageCacheEvents(std::move(resolved_events));

@@ -21,6 +21,16 @@
 #include <vector>
 
 namespace iorap::compiler {
+struct  CompilationInput {
+  /* The name of the perfetto trace. */
+  std::string filename;
+  /*
+   * The timestamp limit of the trace.
+   * It's used to truncate the trace file.
+   */
+  uint64_t timestamp_limit_ns;
+};
+
 // Compile one or more perfetto TracePacket protobufs that are stored on the filesystem
 // by the filenames given with `input_file_names` and timestamp limit given with
 // timestamp_limit_ns.
@@ -34,11 +44,17 @@ namespace iorap::compiler {
 // determines success/failure.
 //
 // Operation is transactional -- that is if there is a failure, `output_file_name` is untouched.
-bool PerformCompilation(std::vector<std::string> input_file_names,
-                        std::vector<uint64_t> timestamp_limit_ns,
+bool PerformCompilation(std::vector<iorap::compiler::CompilationInput> perfetto_traces,
                         std::string output_file_name,
                         bool output_proto,
                         inode2filename::InodeResolverDependencies dependencies);
+
+// The size and order of timestamp_limit_ns should match that of
+// input_file_names, if not empty.
+// If timestamp_limit_ns is empty, will use the max uint64_t.
+std::vector<CompilationInput> MakeCompilationInputs(
+    std::vector<std::string> input_file_names,
+    std::vector<uint64_t> timestamp_limit_ns);
 }
 
 #endif  // IORAP_SRC_COMPILER_COMPILER_H_
