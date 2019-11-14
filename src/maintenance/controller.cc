@@ -15,11 +15,11 @@
 #include "compiler/compiler.h"
 #include "maintenance/controller.h"
 
+#include "common/cmd_utils.h"
 #include "common/debug.h"
 #include "common/expected.h"
 
 #include "db/models.h"
-#include "db/file_models.h"
 #include "inode2filename/inode.h"
 #include "inode2filename/search_directories.h"
 
@@ -34,6 +34,96 @@
 #include <string>
 
 namespace iorap::maintenance {
+
+// Gets the path of output compiled trace.
+db::CompiledTraceFileModel CalculateNewestFilePath(
+    const std::string& package_name,
+    const std::string& activity_name,
+    const std::optional<int> version) {
+   db::VersionedComponentName versioned_component_name{
+     package_name, activity_name, version};
+
+   db::CompiledTraceFileModel output_file =
+       db::CompiledTraceFileModel::CalculateNewestFilePath(versioned_component_name);
+
+   return output_file;
+}
+
+static constexpr const char kCommandFileName[] = "/system/bin/iorap.cmd.compiler";
+
+// Represents the parameters used when fork+exec compiler.
+struct CompilerForkParameters {
+  std::vector<std::string> input_pbs;
+  std::vector<uint64_t> timestamp_limit_ns;
+  std::string output_proto;
+  ControllerParameters controller_params;
+
+  CompilerForkParameters(const std::vector<compiler::CompilationInput>& perfetto_traces,
+                         const std::string& output_proto,
+                         ControllerParameters controller_params) :
+    output_proto(output_proto), controller_params(controller_params) {
+        for (compiler::CompilationInput perfetto_trace : perfetto_traces) {
+          input_pbs.push_back(perfetto_trace.filename);
+          timestamp_limit_ns.push_back(perfetto_trace.timestamp_limit_ns);
+        }
+  }
+};
+
+using ArgString = const char*;
+
+std::vector<std::string> MakeCompilerParams(const CompilerForkParameters& params) {
+    std::vector<std::string> argv;
+    ControllerParameters controller_params = params.controller_params;
+
+    common::AppendArgsRepeatedly(argv, params.input_pbs);
+    common::AppendArgsRepeatedly(argv, "--timestamp_limit_ns", params.timestamp_limit_ns);
+
+    if (controller_params.output_text) {
+      argv.push_back("--output-text");
+    }
+
+    common::AppendArgs(argv, "--output-proto", params.output_proto);
+
+    if (controller_params.inode_textcache) {
+      common::AppendArgs(argv, "--inode-textcache", *controller_params.inode_textcache);
+    }
+
+    if (controller_params.verbose) {
+      argv.push_back("--verbose");
+    }
+
+    return argv;
+}
+
+bool StartViaFork(const CompilerForkParameters& params) {
+  pid_t child = fork();
+
+  if (child == -1) {
+    LOG(FATAL) << "Failed to fork a process for compilation";
+  } else if (child > 0) {  // we are the caller of this function
+    LOG(DEBUG) << "forked into a process for compilation , pid = " << child;
+    return true;
+  } else {
+    // we are the child that was forked.
+    std::vector<std::string> argv_vec = MakeCompilerParams(params);
+    std::unique_ptr<ArgString[]> argv_ptr =
+        common::VecToArgv(kCommandFileName, argv_vec);
+
+    std::stringstream argv; // for debugging.
+    for (std::string arg : argv_vec) {
+      argv  << arg << ' ';
+    }
+    LOG(DEBUG) << "fork+exec: " << kCommandFileName << " " << argv.str();
+
+    ControllerParameters controller_params = params.controller_params;
+    execve(kCommandFileName, (char **)argv_ptr.get(), /*envp*/nullptr);
+    // This should never return.
+    _exit(EXIT_FAILURE);
+  }
+
+  DCHECK(false);
+  return false;
+}
 
 // Gets the perfetto trace infos in the histories.
 std::vector<compiler::CompilationInput> GetPerfettoTraceInfo(
@@ -65,19 +155,6 @@ std::vector<compiler::CompilationInput> GetPerfettoTraceInfo(
   return perfetto_traces;
 }
 
-// Gets the path of output compiled trace.
-db::CompiledTraceFileModel GetOutputFile(const std::string& package_name,
-                                         const std::string& activity_name,
-                                         const std::optional<int> version) {
-   db::VersionedComponentName versioned_component_name{
-     package_name, activity_name, version};
-
-   db::CompiledTraceFileModel output_file =
-       db::CompiledTraceFileModel::CalculateNewestFilePath(versioned_component_name);
-
-   return output_file;
-}
-
 // Helper struct for printing vector.
 template <class T>
 struct VectorPrinter {
@@ -106,15 +183,13 @@ bool CompileActivity(const db::DbHandle& db,
                      int package_id,
                      const std::string& package_name,
                      const std::string& activity_name,
-                     bool output_text,
-                     const inode2filename::InodeResolverDependencies& dependencies,
-                     bool recompile) {
-  db::CompiledTraceFileModel output_file = GetOutputFile(package_name,
-                                                         activity_name,
-                                                         /* version= */std::nullopt);
+                     const ControllerParameters& params) {
+  db::CompiledTraceFileModel output_file = CalculateNewestFilePath(
+      package_name, activity_name, /* version= */std::nullopt);
+
   std::string file_path = output_file.FilePath();
 
-  if (!recompile && std::filesystem::exists(file_path)) {
+  if (!params.recompile && std::filesystem::exists(file_path)) {
     LOG(DEBUG) << "compiled trace exists in " << file_path;
     return true;
   }
@@ -146,13 +221,16 @@ bool CompileActivity(const db::DbHandle& db,
                << " package_name: " << package_name
                << " activity_name: " << activity_name
                << " file_path: " << file_path
+               << " verbose: " << params.verbose
                << " perfetto_traces: "
                << VectorPrinter<compiler::CompilationInput>{perfetto_traces};
+    if (params.inode_textcache) {
+      LOG(DEBUG) << "inode_textcache: " << *params.inode_textcache;
+    }
 
-    if (!PerformCompilation(std::move(perfetto_traces),
-                            file_path,
-                            !output_text,
-                            dependencies)) {
+    CompilerForkParameters compiler_params{perfetto_traces, file_path, params};
+
+    if (!StartViaFork(compiler_params)) {
       LOG(ERROR) << "Compilation failed for package_id:" << package_id
                  <<" activity_name: " <<activity_name;
       return false;
@@ -172,9 +250,7 @@ bool CompileActivity(const db::DbHandle& db,
 // Compiled the perfetto traces for activities in an package.
 bool CompilePackage(const db::DbHandle& db,
                     const std::string& package_name,
-                    bool output_text,
-                    const inode2filename::InodeResolverDependencies& dependencies,
-                    bool recompile) {
+                    const ControllerParameters& params) {
 
   std::optional<db::PackageModel> package =
       db::PackageModel::SelectByName(db, package_name.c_str());
@@ -189,13 +265,7 @@ bool CompilePackage(const db::DbHandle& db,
 
   bool ret = true;
   for (db::ActivityModel activity : activities) {
-    if (!CompileActivity(db,
-                         package->id,
-                         package->name,
-                         activity.name,
-                         output_text,
-                         dependencies,
-                         recompile)) {
+    if (!CompileActivity(db, package->id, package->name, activity.name, params)) {
       ret = false;
     }
   }
@@ -203,18 +273,11 @@ bool CompilePackage(const db::DbHandle& db,
 }
 
 // Compiled the perfetto traces for packages in a device.
-bool CompileAppsOnDevice(const db::DbHandle& db,
-                         bool output_text,
-                         const inode2filename::InodeResolverDependencies& dependencies,
-                         bool recompile) {
+bool CompileAppsOnDevice(const db::DbHandle& db, const ControllerParameters& params) {
   std::vector<db::PackageModel> packages = db::PackageModel::SelectAll(db);
   bool ret = true;
   for (db::PackageModel package : packages) {
-    if (!CompilePackage(db,
-                        package.name,
-                        output_text,
-                        dependencies,
-                        recompile)) {
+    if (!CompilePackage(db, package.name, params)) {
       ret = false;
     }
   }
@@ -222,31 +285,24 @@ bool CompileAppsOnDevice(const db::DbHandle& db,
   return ret;
 }
 
-bool Compile(const std::string& db_path,
-             bool output_text,
-             const inode2filename::InodeResolverDependencies& dependencies,
-             bool recompile) {
+bool Compile(const std::string& db_path, const ControllerParameters& params) {
   iorap::db::SchemaModel db_schema = db::SchemaModel::GetOrCreate(db_path);
   db::DbHandle db{db_schema.db()};
-  return CompileAppsOnDevice(db, output_text, dependencies, recompile);
+  return CompileAppsOnDevice(db, params);
 }
 
 bool Compile(const std::string& db_path,
              const std::string& package_name,
-             bool output_text,
-             const inode2filename::InodeResolverDependencies& dependencies,
-             bool recompile) {
+             const ControllerParameters& params) {
   iorap::db::SchemaModel db_schema = db::SchemaModel::GetOrCreate(db_path);
   db::DbHandle db{db_schema.db()};
-  return CompilePackage(db, package_name, output_text, dependencies, recompile);
+  return CompilePackage(db, package_name, params);
 }
 
 bool Compile(const std::string& db_path,
              const std::string& package_name,
              const std::string& activity_name,
-             bool output_text,
-             const inode2filename::InodeResolverDependencies& dependencies,
-             bool recompile) {
+             const ControllerParameters& params) {
   iorap::db::SchemaModel db_schema = db::SchemaModel::GetOrCreate(db_path);
   db::DbHandle db{db_schema.db()};
 
@@ -256,13 +312,7 @@ bool Compile(const std::string& db_path,
     LOG(ERROR) << "Cannot find package with name " << package_name;
     return false;
   }
-  return CompileActivity(db,
-                         package->id,
-                         package_name,
-                         activity_name,
-                         output_text,
-                         dependencies,
-                         recompile) ;
+  return CompileActivity(db, package->id, package_name, activity_name, params);
 }
 
 }  // namespace iorap::maintenance
