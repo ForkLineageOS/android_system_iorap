@@ -17,6 +17,7 @@
 #include "maintenance/controller.h"
 
 #include <android-base/parseint.h>
+#include <android-base/properties.h>
 #include <android-base/logging.h>
 
 #include <iostream>
@@ -41,6 +42,8 @@ void Usage(char** argv) {
             << std::endl;
   std::cerr << "    --verbose,-v               Set verbosity (default off)." << std::endl;
   std::cerr << "    --output-text,-ot          Output ascii text instead of protobuf (default off)." << std::endl;
+  std::cerr << "    --min_traces,-mt           The min number of perfetto traces needed for compilation (default 1)."
+            << std::endl;
   exit(1);
 }
 
@@ -61,6 +64,7 @@ int Main(int argc, char** argv){
   bool recompile = false;
   bool enable_verbose = false;
   bool arg_output_text = false;
+  uint64_t arg_min_traces = 1;
 
   for (int arg = 1; arg < argc; ++arg) {
     std::string argstr = argv[arg];
@@ -96,7 +100,14 @@ int Main(int argc, char** argv){
       recompile = true;
     } else if (argstr == "--output-text" || argstr == "-ot") {
       arg_output_text = true;
-    }else {
+    } else if (argstr == "--min_traces" || argstr == "-mt") {
+      if (!has_arg_next) {
+        std::cerr << "Missing --min_traces <value>" << std::endl;
+        return 1;
+      }
+      arg_min_traces = std::stoul(arg_next);
+      ++arg;
+    } else {
       arg_input_filenames.push_back(argstr);
     }
   }
@@ -124,7 +135,8 @@ int Main(int argc, char** argv){
     arg_output_text,
     arg_inode_textcache,
     enable_verbose,
-    recompile};
+    recompile,
+    arg_min_traces};
 
   int ret_code = 0;
   if (arg_package && arg_activity) {

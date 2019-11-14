@@ -216,6 +216,12 @@ bool CompileActivity(const db::DbHandle& db,
     std::vector<compiler::CompilationInput> perfetto_traces =
         GetPerfettoTraceInfo(db, histories);
 
+    if (perfetto_traces.size() < params.min_traces) {
+      LOG(DEBUG) << "The number of perfetto traces is " << perfetto_traces.size()
+                 <<", which is less than " << params.min_traces;
+      return false;
+    }
+
     // Show the compilation config.
     LOG(DEBUG) << "Try to compiled package_id: " << package_id
                << " package_name: " << package_name
@@ -251,7 +257,6 @@ bool CompileActivity(const db::DbHandle& db,
 bool CompilePackage(const db::DbHandle& db,
                     const std::string& package_name,
                     const ControllerParameters& params) {
-
   std::optional<db::PackageModel> package =
       db::PackageModel::SelectByName(db, package_name.c_str());
 
