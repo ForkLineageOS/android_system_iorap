@@ -49,7 +49,22 @@ db::CompiledTraceFileModel CalculateNewestFilePath(
    return output_file;
 }
 
+using ArgString = const char*;
+
 static constexpr const char kCommandFileName[] = "/system/bin/iorap.cmd.compiler";
+
+int Exec::Execve(const std::string& pathname,
+                 std::vector<std::string>& argv_vec,
+                 char *const envp[]) {
+  std::unique_ptr<ArgString[]> argv_ptr =
+      common::VecToArgv(kCommandFileName, argv_vec);
+
+  return execve(pathname.c_str(), (char**)argv_ptr.get(), envp);
+}
+
+pid_t Exec::Fork() {
+  return fork();
+}
 
 // Represents the parameters used when fork+exec compiler.
 struct CompilerForkParameters {
@@ -68,8 +83,6 @@ struct CompilerForkParameters {
         }
   }
 };
-
-using ArgString = const char*;
 
 std::vector<std::string> MakeCompilerParams(const CompilerForkParameters& params) {
     std::vector<std::string> argv;
@@ -96,7 +109,8 @@ std::vector<std::string> MakeCompilerParams(const CompilerForkParameters& params
 }
 
 bool StartViaFork(const CompilerForkParameters& params) {
-  pid_t child = fork();
+  const ControllerParameters& controller_params = params.controller_params;
+  pid_t child = controller_params.exec->Fork();
 
   if (child == -1) {
     LOG(FATAL) << "Failed to fork a process for compilation";
@@ -115,13 +129,11 @@ bool StartViaFork(const CompilerForkParameters& params) {
     }
     LOG(DEBUG) << "fork+exec: " << kCommandFileName << " " << argv.str();
 
-    ControllerParameters controller_params = params.controller_params;
-    execve(kCommandFileName, (char **)argv_ptr.get(), /*envp*/nullptr);
+    controller_params.exec->Execve(kCommandFileName,
+                                          argv_vec,
+                                         /*envp*/nullptr);
     // This should never return.
-    _exit(EXIT_FAILURE);
   }
-
-  DCHECK(false);
   return false;
 }
 
@@ -184,19 +196,14 @@ bool CompileActivity(const db::DbHandle& db,
                      const std::string& package_name,
                      const std::string& activity_name,
                      const ControllerParameters& params) {
-  db::CompiledTraceFileModel output_file = CalculateNewestFilePath(
-      package_name, activity_name, /* version= */std::nullopt);
+  db::CompiledTraceFileModel output_file =
+      CalculateNewestFilePath(package_name, activity_name, /* version= */std::nullopt);
 
   std::string file_path = output_file.FilePath();
 
   if (!params.recompile && std::filesystem::exists(file_path)) {
     LOG(DEBUG) << "compiled trace exists in " << file_path;
     return true;
-  }
-
-  if (!output_file.MkdirWithParents()) {
-    LOG(ERROR) << "Compile activity failed. Failed to mkdirs " << file_path;
-    return false;
   }
 
   std::optional<db::ActivityModel> activity =
@@ -235,6 +242,11 @@ bool CompileActivity(const db::DbHandle& db,
     }
 
     CompilerForkParameters compiler_params{perfetto_traces, file_path, params};
+
+    if (!output_file.MkdirWithParents()) {
+      LOG(ERROR) << "Compile activity failed. Failed to mkdirs " << file_path;
+      return false;
+    }
 
     if (!StartViaFork(compiler_params)) {
       LOG(ERROR) << "Compilation failed for package_id:" << package_id

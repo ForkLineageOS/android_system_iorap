@@ -136,7 +136,8 @@ int Main(int argc, char** argv){
     arg_inode_textcache,
     enable_verbose,
     recompile,
-    arg_min_traces};
+    arg_min_traces,
+    std::make_shared<Exec>()};
 
   int ret_code = 0;
   if (arg_package && arg_activity) {

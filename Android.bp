@@ -245,19 +245,27 @@ cc_test_host {
         "iorap-default-flags",
         "iorap-default-dependencies",
         "libiorap-compiler-default-dependencies",
+        "libiorap-maintenance-default-dependencies",
     ],
     srcs: [
         "tests/src/compiler/*.cc",
         "tests/src/db/*.cc",
+        "tests/src/maintenance/*.cc",
     ],
     data: [
         "tests/src/compiler/testdata/*",
+        "tests/src/maintenance/testdata/*",
     ],
     cflags: ["-O2", "-UNDEBUG"],
 
     // TODO:  we should probably have per-component tests.
-    static_libs: ["libgmock_main", "libgmock", "libgtest", "libiorap-compiler"],
-
+    static_libs: [
+    "libgmock_main",
+    "libgmock",
+    "libgtest",
+    "libiorap-compiler",
+    "libiorap-maintenance",
+    ],
 }
 
 filegroup {

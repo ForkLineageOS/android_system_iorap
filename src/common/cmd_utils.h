@@ -15,6 +15,8 @@
 #ifndef IORAP_SRC_COMMON_CMD_UTILS_H_
 #define IORAP_SRC_COMMON_CMD_UTILS_H_
 
+#include <android-base/properties.h>
+
 #include <iostream>
 #include <sstream>
 #include <optional>
@@ -84,6 +86,25 @@ void AppendArgsRepeatedly(std::vector<std::string>& argv,
   for (const T& v : values) {
      AppendArgs(argv, v);
   }
+}
+
+// Get the value of the property.
+// Firstly, try to find the environment variable. If it does not exist,
+// try to get the property. If neither, use the default value..
+//
+// For example, for prop foo.bar.baz, it will first check for
+// FOO_BAR_BAZ environment variable.
+inline std::string GetEnvOrProperty(const std::string& prop, const std::string& default_val) {
+  std::string env_str = prop;
+  // a.b.c -> a_b_c
+  std::replace(env_str.begin(), env_str.end(), '.', '_');
+  // a_b_c -> A_B_C
+  std::transform(env_str.begin(), env_str.end(), env_str.begin(), ::toupper);
+  char *env = getenv(env_str.c_str());
+  if (env) {
+    return std::string(env);
+  }
+  return ::android::base::GetProperty(prop, default_val);
 }
 
 }   // namespace iorap::common

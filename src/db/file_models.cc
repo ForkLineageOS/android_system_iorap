@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "common/cmd_utils.h"
 #include "db/file_models.h"
 #include "db/models.h"
 
 #include <android-base/file.h>
 #include <android-base/properties.h>
 
+#include <algorithm>
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -26,7 +28,7 @@
 
 namespace iorap::db {
 
-static constexpr const char* kRootPath = "/data/misc/iorapd";
+static constexpr const char* kRootPathProp = "iorapd.root.dir";
 static const unsigned int kPerfettoMaxTraces =
     ::android::base::GetUintProperty("iorapd.perfetto.max_traces", /*default*/10u);
 
@@ -77,12 +79,14 @@ static bool MkdirWithParents(const std::string& path) {
 
 FileModelBase::FileModelBase(VersionedComponentName vcn)
   : vcn_{std::move(vcn)} {
+    root_path_ = common::GetEnvOrProperty(kRootPathProp,
+                                          /*default*/"/data/misc/iorapd");
 }
 
 std::string FileModelBase::BaseDir() const {
   std::stringstream ss;
 
-  ss << kRootPath << "/" << vcn_.GetPackage() << "/";
+  ss << root_path_ << "/" << vcn_.GetPackage() << "/";
   if (vcn_.GetVersion()) {
     ss << *vcn_.GetVersion();
   } else {

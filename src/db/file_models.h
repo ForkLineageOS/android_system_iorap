@@ -82,6 +82,7 @@ class FileModelBase {
   VersionedComponentName vcn_;
   std::string subdir_;
   std::string filename_;
+  std::string root_path_;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const FileModelBase& fmb) {
