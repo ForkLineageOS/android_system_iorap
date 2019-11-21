@@ -68,6 +68,14 @@ struct AppLaunchEventState {
   std::optional<rxcpp::subscriber<int>> history_id_subscriber_;
   rxcpp::observable<int> history_id_observable_;
 
+  std::optional<uint64_t> intent_started_ns_;
+  std::optional<uint64_t> total_time_ns_;
+
+  // Used by kReportFullyDrawn to find the right history_id.
+  // We assume no interleaving between different sequences.
+  // This assumption is checked in the Java service code.
+  std::optional<uint64_t> recent_history_id_;
+
   // labeled as 'shared' due to rx not being able to handle move-only objects.
   // lifetime: in practice equivalent to unique_ptr.
   std::shared_ptr<prefetcher::ReadAhead> read_ahead_;
@@ -161,6 +169,12 @@ struct AppLaunchEventState {
           rx_lifetime_ = StartTracing(std::move(component_name));
         }
 
+        if (event.timestamp_nanos >= 0) {
+          intent_started_ns_ = event.timestamp_nanos;
+        } else {
+          LOG(WARNING) << "Negative event timestamp: " << event.timestamp_nanos;
+        }
+
         break;
       }
       case Type::kIntentFailed:
@@ -219,6 +233,9 @@ struct AppLaunchEventState {
         break;
       }
       case Type::kActivityLaunchFinished:
+        if (event.timestamp_nanos >= 0) {
+           total_time_ns_ = event.timestamp_nanos;
+        }
         RecordDbLaunchHistory();
         // Finish tracing and collect trace buffer.
         //
@@ -234,9 +251,14 @@ struct AppLaunchEventState {
         AbortTrace();
         AbortReadAhead();
         break;
-      case Type::kReportFullyDrawn:
-        // TODO(yawanng) add handling of this event.
+      case Type::kReportFullyDrawn: {
+        if (!recent_history_id_) {
+          LOG(WARNING) << "Dangling kReportFullyDrawn event";
+          return;
+        }
+        UpdateReportFullyDrawn(event.timestamp_nanos, *recent_history_id_);
         break;
+      }
       default:
         DCHECK(false) << "invalid type: " << event;  // binder layer should've rejected this.
         LOG(ERROR) << "invalid type: " << event;  // binder layer should've rejected this.
@@ -426,11 +448,14 @@ struct AppLaunchEventState {
     if (!history) {
       history_id_subscriber_->on_error(rxcpp::util::make_error_ptr(
           std::ios_base::failure("Failed to insert history id")));
+      recent_history_id_ = std::nullopt;
     } else {
       // Note: we must have already subscribed, or this value will disappear.
       LOG(VERBOSE) << "history_id_subscriber on_next history_id=" << history->id;
       history_id_subscriber_->on_next(history->id);
       history_id_subscriber_->on_completed();
+
+      recent_history_id_ = history->id;
     }
     history_id_subscriber_ = std::nullopt;
   }
@@ -468,8 +493,11 @@ struct AppLaunchEventState {
                                       temp,
                                       IsTracing(),
                                       IsReadAhead(),
-                                      /*total_time_ns*/std::nullopt,
-                                      /*report_fully_drawn_ns*/std::nullopt);
+                                      intent_started_ns_,
+                                      total_time_ns_,
+                                      // ReportFullyDrawn event normally occurs after this. Need update later.
+                                      /* report_fully_drawn_ns= */ std::nullopt);
+    //Repo
     if (!alh) {
       LOG(WARNING) << "Failed to insert app_launch_histories row";
       return std::nullopt;
@@ -477,6 +505,26 @@ struct AppLaunchEventState {
 
     LOG(VERBOSE) << "RecordDbLaunchHistory: " << *alh;
     return alh;
+  }
+
+  void UpdateReportFullyDrawn(int history_id, uint64_t timestamp_ns) {
+    if (timestamp_ns < 0) {
+      LOG(WARNING) << "Invalid timestamp_ns: " << timestamp_ns;
+      return;
+    }
+
+    android::ScopedTrace trace{ATRACE_TAG_PACKAGE_MANAGER,
+                               "IorapNativeService::UpdateReportFullyDrawn"};
+    db::DbHandle db{db::SchemaModel::GetSingleton()};
+
+    bool result =
+        db::AppLaunchHistoryModel::UpdateReportFullyDrawn(db,
+                                                          history_id,
+                                                          timestamp_ns);
+
+    if (!result) {
+      LOG(WARNING) << "Failed to update app_launch_histories row";
+    }
   }
 };
 

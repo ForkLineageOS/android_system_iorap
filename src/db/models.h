@@ -306,9 +306,18 @@ class DbQueryBuilder {
     return static_cast<int>(last_rowid);
   }
 
-  // Returns the row ID that was inserted last.
   template <typename... Args>
   static bool Delete(DbHandle db, const std::string& sql, Args&&... args) {
+    return ExecuteOnce(db, sql, std::forward<Args>(args)...);
+  }
+
+  template <typename... Args>
+  static bool Update(DbHandle db, const std::string& sql, Args&&... args) {
+    return ExecuteOnce(db, sql, std::forward<Args>(args)...);
+  }
+
+  template <typename... Args>
+  static bool ExecuteOnce(DbHandle db, const std::string& sql, Args&&... args) {
     ScopedLockDb lock{db};
 
     DbStatement stmt = DbStatement::Prepare(db, sql, std::forward<Args>(args)...);
@@ -736,6 +745,7 @@ class AppLaunchHistoryModel : public Model {
                                     p.temperature,
                                     p.trace_enabled,
                                     p.readahead_enabled,
+                                    p.intent_started_ns,
                                     p.total_time_ns,
                                     p.report_fully_drawn_ns)) {
       return std::nullopt;
@@ -780,13 +790,14 @@ class AppLaunchHistoryModel : public Model {
                                                      AppLaunchHistoryModel::Temperature temperature,
                                                      bool trace_enabled,
                                                      bool readahead_enabled,
+                                                     std::optional<uint64_t> intent_started_ns,
                                                      std::optional<uint64_t> total_time_ns,
                                                      std::optional<uint64_t> report_fully_drawn_ns)
   {
     const char* sql = "INSERT INTO app_launch_histories (activity_id, temperature, trace_enabled, "
-                                                        "readahead_enabled, total_time_ns, "
-                                                        "report_fully_drawn_ns) "
-                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
+                                                        "readahead_enabled, intent_started_ns, "
+                                                        "total_time_ns, report_fully_drawn_ns) "
+                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
 
     std::optional<int> inserted_row_id =
         DbQueryBuilder::Insert(db,
@@ -795,6 +806,7 @@ class AppLaunchHistoryModel : public Model {
                                temperature,
                                trace_enabled,
                                readahead_enabled,
+                               intent_started_ns,
                                total_time_ns,
                                report_fully_drawn_ns);
     if (!inserted_row_id) {
@@ -807,10 +819,28 @@ class AppLaunchHistoryModel : public Model {
     p.temperature = temperature;
     p.trace_enabled = trace_enabled;
     p.readahead_enabled = readahead_enabled;
+    p.intent_started_ns = intent_started_ns;
     p.total_time_ns = total_time_ns;
     p.report_fully_drawn_ns = report_fully_drawn_ns;
 
     return p;
+  }
+
+  static bool UpdateReportFullyDrawn(DbHandle db,
+                                     int history_id,
+                                     std::optional<uint64_t> report_fully_drawn_ns)
+  {
+    const char* sql = "UPDATE app_launch_histories "
+                      "SET report_fully_drawn_ns = ?1 "
+                      "WHERE id = ?2;";
+
+    bool result = DbQueryBuilder::Update(db, sql, history_id, report_fully_drawn_ns);
+
+    if (!result) {
+      LOG(ERROR)<< "Failed to update history_id:"<< history_id
+                << ", report_fully_drawn_ns: " << report_fully_drawn_ns.value();
+    }
+    return result;
   }
 
   int id;
@@ -818,6 +848,7 @@ class AppLaunchHistoryModel : public Model {
   Temperature temperature = Temperature::kUninitialized;
   bool trace_enabled;
   bool readahead_enabled;
+  std::optional<uint64_t> intent_started_ns;
   std::optional<uint64_t> total_time_ns;
   std::optional<uint64_t> report_fully_drawn_ns;
 };
@@ -828,7 +859,14 @@ inline std::ostream& operator<<(std::ostream& os, const AppLaunchHistoryModel& p
      << "temperature=" << static_cast<int>(p.temperature) << ","
      << "trace_enabled=" << p.trace_enabled << ","
      << "readahead_enabled=" << p.readahead_enabled << ","
-     << "total_time_ns=";
+     << "intent_started_ns=";
+  if (p.intent_started_ns) {
+    os << *p.intent_started_ns;
+  } else {
+    os << "(nullopt)";
+  }
+  os << ",";
+  os << "total_time_ns=";
   if (p.total_time_ns) {
     os << *p.total_time_ns;
   } else {

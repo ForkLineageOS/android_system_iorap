@@ -60,7 +60,7 @@ struct AppLaunchEvent : public ::android::Parcelable {
   Temperature temperature{Temperature::kUninitialized};
   // kActivityLaunch*. Can be null in kActivityLaunchCancelled.
   std::unique_ptr<ActivityRecordProto> activity_record_proto;
-  // kReportFullyDrawn only.
+  // kIntentStarted, kActivityLaunchFinished and kReportFullyDrawn only.
   int64_t timestamp_nanos{-1};
 
   AppLaunchEvent() = default;
