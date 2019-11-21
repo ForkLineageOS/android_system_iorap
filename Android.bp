@@ -469,6 +469,7 @@ cc_defaults {
         "libiorap-serialize",
     ],
     shared_libs: [
+        "libminijail",
     ],
 }
 
@@ -549,6 +550,28 @@ cc_binary {
   },
 
   static_libs: [
+  ],
+}
+
+prebuilt_etc {
+  name: "iorap.prefetcherd.policy",
+  sub_dir: "seccomp_policy",
+  arch: {
+    arm: {
+      src: "seccomp_policy/prefetcherd.arm.policy"
+    },
+    arm64: {
+      src: "seccomp_policy/prefetcherd.arm64.policy"
+    },
+    x86: {
+      src: "seccomp_policy/prefetcherd.x86.policy"
+    },
+    x86_64: {
+      src: "seccomp_policy/prefetcherd.x86_64.policy"
+    },
+  },
+  required: [
+      "crash_dump.policy",
   ],
 }
 

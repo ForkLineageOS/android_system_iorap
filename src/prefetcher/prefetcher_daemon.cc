@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "prefetcher/minijail.h"
 #include "prefetcher/prefetcher_daemon.h"
 #include "prefetcher/session_manager.h"
 #include "prefetcher/session.h"
@@ -50,6 +51,9 @@ static bool LogVerboseIpc() {
 
   return verbose_ipc;
 }
+
+static const bool kInstallMiniJail =
+    ::android::base::GetBoolProperty("iorapd.readahead.minijail", /*default*/true);
 
 static constexpr const char kCommandFileName[] = "/system/bin/iorap.prefetcherd";
 
@@ -1084,6 +1088,14 @@ std::optional<PrefetcherForkParameters> StartSocketViaFork() {
     Command next_command{};
 
     std::vector<Command> many_commands;
+
+    // Ensure alogd is pre-initialized before installing minijail.
+    LOG(DEBUG) << "Installing minijail";
+
+    // Install seccomp filter using libminijail.
+    if (kInstallMiniJail) {
+      MiniJail();
+    }
 
     while (true) {
       bool eof = false;
