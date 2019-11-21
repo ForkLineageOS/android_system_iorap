@@ -471,6 +471,13 @@ cc_defaults {
     shared_libs: [
         "libminijail",
     ],
+
+    // disable mac builds because libminijail doesn't work there
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
 }
 
 cc_library_static {
