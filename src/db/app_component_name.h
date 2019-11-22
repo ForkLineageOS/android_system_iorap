@@ -21,6 +21,16 @@ struct AppComponentName {
   std::string package;
   std::string activity_name;
 
+  // Turns the activity name to the fully qualified name.
+  // For example, if the activity name is ".MainActivity" and the package is
+  // foo.bar. Then the fully qualified name is foo.bar.MainActivity.
+  AppComponentName Canonicalize() const {
+    if (!activity_name.empty() && activity_name[0] == '.') {
+      return {package, package + activity_name};
+    }
+    return {package, activity_name};
+  }
+
   static bool HasAppComponentName(const std::string& s) {
     return s.find('/') != std::string::npos;
   }

@@ -25,10 +25,12 @@
 #include "prefetcher/read_ahead.h"
 #include "prefetcher/task_id.h"
 
+#include <android-base/chrono_utils.h>
 #include <android-base/properties.h>
 #include <rxcpp/rx.hpp>
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <utils/Trace.h>
 
@@ -159,13 +161,12 @@ struct AppLaunchEventState {
         const std::string& package_name = event.intent_proto->component().package_name();
         const std::string& class_name = event.intent_proto->component().class_name();
         AppComponentName component_name{package_name, class_name};
-
-        component_name_ = component_name;
+        component_name_ = component_name.Canonicalize();
 
         if (allowed_readahead_) {
           StartReadAhead(sequence_id_, component_name);
         }
-        if (allowed_tracing_) {
+        if (allowed_tracing_ && !IsReadAhead()) {
           rx_lifetime_ = StartTracing(std::move(component_name));
         }
 
@@ -212,13 +213,12 @@ struct AppLaunchEventState {
           }
 
           AppComponentName component_name = AppComponentName::FromString(title);
-
-          component_name_ = component_name;
+          component_name_ = component_name.Canonicalize();
 
           if (allowed_readahead_ && !IsReadAhead()) {
             StartReadAhead(sequence_id_, component_name);
           }
-          if (allowed_tracing_ && !IsTracing()) {
+          if (allowed_tracing_ && !IsTracing() && !IsReadAhead()) {
             rx_lifetime_ = StartTracing(std::move(component_name));
           }
         } else {
@@ -271,17 +271,63 @@ struct AppLaunchEventState {
     return read_ahead_task_.has_value();
   }
 
-  void StartReadAhead(size_t id, const AppComponentName& component_name) {
-    DCHECK(allowed_readahead_);
-    DCHECK(!IsReadAhead());
+  // Gets the compiled trace.
+  // If a compiled trace exists in sqlite, use that one. Otherwise, try
+  // to find a prebuilt one.
+  std::optional<std::string> GetCompiledTrace(const AppComponentName& component_name) {
+    // Firstly, try to find the compiled trace from sqlite.
+    android::base::Timer timer{};
+    db::DbHandle db{db::SchemaModel::GetSingleton()};
+    std::optional<db::PrefetchFileModel> compiled_trace =
+        db::PrefetchFileModel::SelectByPackageNameActivityName(db,
+                                                               component_name.package,
+                                                               component_name.activity_name);
 
-    // This is changed from "/data/misc/iorapd/" for testing purpose.
-    // TODO: b/139831359.
+    std::chrono::milliseconds duration_ms = timer.duration();
+    LOG(DEBUG) << "EventManager: Looking up compiled trace done in "
+               << duration_ms.count() // the count of ticks.
+               << "ms.";
+
+    if (compiled_trace) {
+      if (std::filesystem::exists(compiled_trace->file_path)) {
+        return compiled_trace->file_path;
+      } else {
+        LOG(ERROR) << "Compiled trace in sqlite doesn't exists. file_path: "
+                   << compiled_trace->file_path;
+      }
+    }
+
+    LOG(DEBUG) << "Cannot find compiled trace in sqlite for package_name: "
+               << component_name.package
+               << " activity_name: "
+               << component_name.activity_name;
+
+    // If sqlite doesn't have the compiled trace, try the prebuilt path.
     std::string file_path = "/product/iorap-trace/";
     file_path += component_name.ToMakeFileSafeEncodedPkgString();
     file_path += ".compiled_trace.pb";
 
-    prefetcher::TaskId task{id, std::move(file_path)};
+    if (std::filesystem::exists(file_path)) {
+      return file_path;
+    }
+
+    LOG(ERROR) << "Prebuilt compiled trace doesn't exists. file_path: "
+               << file_path;
+
+    return std::nullopt;
+  }
+
+  void StartReadAhead(size_t id, const AppComponentName& component_name) {
+    DCHECK(allowed_readahead_);
+    DCHECK(!IsReadAhead());
+
+    std::optional<std::string> file_path = GetCompiledTrace(component_name);
+    if (!file_path) {
+      LOG(VERBOSE) << "Cannot find a compiled trace.";
+      return;
+    }
+
+    prefetcher::TaskId task{id, *file_path};
     read_ahead_->BeginTask(task);
     // TODO: non-void return signature?
 

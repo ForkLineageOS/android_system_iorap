@@ -61,6 +61,7 @@ cc_defaults {
     */
 
     clang: true,
+    static_libs: ["libc++fs"],
     shared_libs: ["libbase"],
 
     // build all ioraps for host.
@@ -247,6 +248,7 @@ cc_test_host {
     ],
     srcs: [
         "tests/src/compiler/*.cc",
+        "tests/src/db/*.cc",
     ],
     data: [
         "tests/src/compiler/testdata/*",
@@ -655,7 +657,6 @@ cc_defaults {
     include_dirs: [],
 
     static_libs: [
-        "libc++fs",
         "libiorap-compiler",
         "libiorap-db",
     ],

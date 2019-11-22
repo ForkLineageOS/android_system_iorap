@@ -766,8 +766,8 @@ class AppLaunchHistoryModel : public Model {
     std::string query = "SELECT * FROM app_launch_histories "
                         "WHERE activity_id = ?1 AND"
                         "  temperature = 1 AND"
-                        "  trace_enabled = TRUE"
-                        "  intent_started_ns != NULL;";
+                        "  trace_enabled = TRUE AND"
+                        "  intent_started_ns IS NOT NULL;";
     DbStatement stmt = DbStatement::Prepare(db, query, activity_id);
     std::vector<AppLaunchHistoryModel> result;
 
@@ -778,6 +778,7 @@ class AppLaunchHistoryModel : public Model {
                                       p.temperature,
                                       p.trace_enabled,
                                       p.readahead_enabled,
+                                      p.intent_started_ns,
                                       p.total_time_ns,
                                       p.report_fully_drawn_ns)) {
       result.push_back(p);
@@ -978,6 +979,28 @@ class PrefetchFileModel : public Model {
   }
 
  public:
+  static std::optional<PrefetchFileModel> SelectByPackageNameActivityName(
+      DbHandle db, const std::string& package_name, const std::string& activity_name) {
+    ScopedLockDb lock{db};
+
+    const char* sql =
+      "SELECT prefetch_files.id, prefetch_files.activity_id, prefetch_files.file_path "
+      "FROM prefetch_files "
+      "INNER JOIN activities ON activities.id = prefetch_files.activity_id "
+      "INNER JOIN packages ON packages.id = activities.package_id "
+      "WHERE packages.name = ? AND activities.name = ? ";
+
+    DbStatement stmt = DbStatement::Prepare(db, sql, package_name, activity_name);
+
+    PrefetchFileModel p{db};
+
+    if (!DbQueryBuilder::SelectOnce(stmt, p.id, p.activity_id, p.file_path)) {
+      return std::nullopt;
+    }
+
+    return p;
+  }
+
   static std::optional<PrefetchFileModel> Insert(DbHandle db,
                                                  int activity_id,
                                                  std::string file_path) {
