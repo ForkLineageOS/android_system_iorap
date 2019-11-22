@@ -508,11 +508,6 @@ struct AppLaunchEventState {
   }
 
   void UpdateReportFullyDrawn(int history_id, uint64_t timestamp_ns) {
-    if (timestamp_ns < 0) {
-      LOG(WARNING) << "Invalid timestamp_ns: " << timestamp_ns;
-      return;
-    }
-
     android::ScopedTrace trace{ATRACE_TAG_PACKAGE_MANAGER,
                                "IorapNativeService::UpdateReportFullyDrawn"};
     db::DbHandle db{db::SchemaModel::GetSingleton()};
