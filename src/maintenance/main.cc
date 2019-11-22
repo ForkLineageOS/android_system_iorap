@@ -15,7 +15,6 @@
 #include "common/debug.h"
 #include "compiler/compiler.h"
 #include "maintenance/controller.h"
-#include "inode2filename/inode_resolver.h"
 
 #include <android-base/parseint.h>
 #include <android-base/logging.h>
@@ -38,11 +37,13 @@ void Usage(char** argv) {
   std::cerr << "    --activity $,-a $          Activity name." << std::endl;
   std::cerr << "    --inode-textcache $,-it $  Resolve inode->filename from textcache." << std::endl;
   std::cerr << "    --help,-h                  Print this Usage." << std::endl;
-  std::cerr << "    --force,-f                 Force compilation, which replace the existing compiled trace ." << std::endl;
+  std::cerr << "    --recompile,-r             Force re-compilation, which replace the existing compiled trace ."
+            << std::endl;
   std::cerr << "    --verbose,-v               Set verbosity (default off)." << std::endl;
   std::cerr << "    --output-text,-ot          Output ascii text instead of protobuf (default off)." << std::endl;
   exit(1);
 }
+
 
 int Main(int argc, char** argv){
   android::base::InitLogging(argv);
@@ -57,7 +58,7 @@ int Main(int argc, char** argv){
   std::optional<std::string> arg_package;
   std::optional<std::string> arg_activity;
   std::optional<std::string> arg_inode_textcache;
-  bool enable_force = false;
+  bool recompile = false;
   bool enable_verbose = false;
   bool arg_output_text = false;
 
@@ -91,8 +92,8 @@ int Main(int argc, char** argv){
       ++arg;
     } else if (argstr == "--verbose" || argstr == "-v") {
       enable_verbose = true;
-    } else if (argstr == "--force" || argstr == "-f") {
-      enable_force = true;
+    } else if (argstr == "--recompile" || argstr == "-r") {
+      recompile = true;
     } else if (argstr == "--output-text" || argstr == "-ot") {
       arg_output_text = true;
     }else {
@@ -119,51 +120,22 @@ int Main(int argc, char** argv){
     android::base::SetMinimumLogSeverity(android::base::DEBUG);
   }
 
-  auto system_call = std::make_unique<SystemCallImpl>();
-
-  inode2filename::InodeResolverDependencies ir_dependencies;
-
-  // Passed from command-line.
-  if (arg_inode_textcache) {
-    ir_dependencies.data_source = inode2filename::DataSourceKind::kTextCache;
-    ir_dependencies.text_cache_filename = arg_inode_textcache;
-    ir_dependencies.verify = inode2filename::VerifyKind::kNone;  // required for determinism.
-  } else {
-    ir_dependencies.data_source = inode2filename::DataSourceKind::kDiskScan;
-    LOG(WARNING) << "--inode-textcache unspecified. "
-                 << "Inodes will be resolved by scanning the disk, which makes compilation "
-                 << "non-deterministic.";
-  }
-  // TODO: add command line.
-  ir_dependencies.root_directories.push_back("/system");
-  ir_dependencies.root_directories.push_back("/apex");
-  ir_dependencies.root_directories.push_back("/data");
-  ir_dependencies.root_directories.push_back("/vendor");
-  ir_dependencies.root_directories.push_back("/product");
-  ir_dependencies.root_directories.push_back("/metadata");
-  // Hardcoded.
-  ir_dependencies.process_mode = inode2filename::ProcessMode::kInProcessDirect;  // TODO: others.
-  ir_dependencies.system_call = /*borrowed*/system_call.get();
+  maintenance::ControllerParameters params{
+    arg_output_text,
+    arg_inode_textcache,
+    enable_verbose,
+    recompile};
 
   int ret_code = 0;
   if (arg_package && arg_activity) {
     ret_code = !Compile(std::move(db),
                         std::move(*arg_package),
                         std::move(*arg_activity),
-                        !arg_output_text,
-                        std::move(ir_dependencies),
-                        enable_force);
+                        params);
   } else if (arg_package) {
-    ret_code = !Compile(std::move(db),
-                        std::move(*arg_package),
-                        !arg_output_text,
-                        std::move(ir_dependencies),
-                        enable_force);
+    ret_code = !Compile(std::move(db), std::move(*arg_package), params);
   } else {
-    ret_code = !Compile(std::move(db),
-                        !arg_output_text,
-                        std::move(ir_dependencies),
-                        enable_force);
+    ret_code = !Compile(std::move(db), params);
   }
   return ret_code;
 }

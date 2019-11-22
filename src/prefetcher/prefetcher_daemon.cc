@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "prefetcher/minijail.h"
+#include "common/cmd_utils.h"
 #include "prefetcher/prefetcher_daemon.h"
 #include "prefetcher/session_manager.h"
 #include "prefetcher/session.h"
@@ -60,28 +61,6 @@ static constexpr const char kCommandFileName[] = "/system/bin/iorap.prefetcherd"
 static constexpr size_t kPipeBufferSize = 1024 * 1024;  // matches /proc/sys/fs/pipe-max-size
 
 using ArgString = const char*;
-
-// Create execve-compatible argv.
-// The lifetime is tied to that of vector.
-std::unique_ptr<ArgString[]> VecToArgv(const char* program_name,
-                                       const std::vector<std::string>& vector) {
-  // include program name in argv[0]
-  // include a NULL sentinel in the end.
-  std::unique_ptr<ArgString[]> ptr{new ArgString[vector.size() + 2]};
-
-  // program name
-  ptr[0] = program_name;
-
-  // all the argv
-  for (size_t i = 0; i < vector.size(); ++i) {
-    ptr[i+1] = vector[i].c_str();
-  }
-
-  // null sentinel
-  ptr[vector.size() + 1] = nullptr;
-
-  return ptr;
-}
 
 std::ostream& operator<<(std::ostream& os, ReadAheadKind ps) {
   switch (ps) {
@@ -1060,7 +1039,7 @@ std::optional<PrefetcherForkParameters> StartSocketViaFork() {
         argv << " --verbose";
       }
 
-      std::unique_ptr<ArgString[]> argv_ptr = VecToArgv(kCommandFileName, argv_vec);
+      std::unique_ptr<ArgString[]> argv_ptr = common::VecToArgv(kCommandFileName, argv_vec);
 
       LOG(DEBUG) << "fork+exec: " << kCommandFileName << " "
                  << argv.str();
