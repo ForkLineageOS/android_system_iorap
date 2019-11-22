@@ -828,17 +828,17 @@ class AppLaunchHistoryModel : public Model {
 
   static bool UpdateReportFullyDrawn(DbHandle db,
                                      int history_id,
-                                     std::optional<uint64_t> report_fully_drawn_ns)
+                                     uint64_t report_fully_drawn_ns)
   {
     const char* sql = "UPDATE app_launch_histories "
                       "SET report_fully_drawn_ns = ?1 "
                       "WHERE id = ?2;";
 
-    bool result = DbQueryBuilder::Update(db, sql, history_id, report_fully_drawn_ns);
+    bool result = DbQueryBuilder::Update(db, sql, report_fully_drawn_ns, history_id);
 
     if (!result) {
       LOG(ERROR)<< "Failed to update history_id:"<< history_id
-                << ", report_fully_drawn_ns: " << report_fully_drawn_ns.value();
+                << ", report_fully_drawn_ns: " << report_fully_drawn_ns;
     }
     return result;
   }

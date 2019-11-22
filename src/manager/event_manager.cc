@@ -256,7 +256,8 @@ struct AppLaunchEventState {
           LOG(WARNING) << "Dangling kReportFullyDrawn event";
           return;
         }
-        UpdateReportFullyDrawn(event.timestamp_nanos, *recent_history_id_);
+        UpdateReportFullyDrawn(*recent_history_id_, event.timestamp_nanos);
+        recent_history_id_ = std::nullopt;
         break;
       }
       default:
@@ -508,6 +509,11 @@ struct AppLaunchEventState {
   }
 
   void UpdateReportFullyDrawn(int history_id, uint64_t timestamp_ns) {
+    LOG(DEBUG) << "Update kReportFullyDrawn for history_id:"
+               << history_id
+               << " timestamp_ns: "
+               << timestamp_ns;
+
     android::ScopedTrace trace{ATRACE_TAG_PACKAGE_MANAGER,
                                "IorapNativeService::UpdateReportFullyDrawn"};
     db::DbHandle db{db::SchemaModel::GetSingleton()};
