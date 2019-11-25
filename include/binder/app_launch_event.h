@@ -31,7 +31,7 @@ namespace binder {
 
 // These protos are part of the iorapd binder ABI, alias them for easier usage.
 using IntentProto = ::android::content::IntentProto;
-using ActivityRecordProto = ::com::android::server::am::ActivityRecordProto;
+using ActivityRecordProto = ::com::android::server::wm::ActivityRecordProto;
 
 struct AppLaunchEvent : public ::android::Parcelable {
   // Index position matters: Keep up-to-date with AppLaunchEvent.java sTypes field.
