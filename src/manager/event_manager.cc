@@ -28,6 +28,7 @@
 #include <android-base/chrono_utils.h>
 #include <android-base/properties.h>
 #include <rxcpp/rx.hpp>
+#include <server_configurable_flags/get_flags.h>
 
 #include <atomic>
 #include <filesystem>
@@ -713,9 +714,16 @@ class EventManager::Impl {
       io_thread_(perfetto::ObserveOnNewIoThread()) {
 
     // TODO: read all properties from one config class.
-    tracing_allowed_ = ::android::base::GetBoolProperty("iorapd.perfetto.enable", /*default*/false);
-    readahead_allowed_ = ::android::base::GetBoolProperty("iorapd.readahead.enable",
-                                                          /*default*/false);
+    // PH properties do not work if they contain ".". "_" was instead used here.
+    const char* ph_namespace = "runtime_native_boot";
+    tracing_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
+        ph_namespace,
+        "iorap_perfetto_enable",
+        ::android::base::GetProperty("iorapd.perfetto.enable", /*default*/"false")) == "true";
+    readahead_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
+        ph_namespace,
+        "iorap_readahead_enable",
+        ::android::base::GetProperty("iorapd.readahead.enable", /*default*/"false")) == "true";
 
     rx_lifetime_ = InitializeRxGraph();
     rx_lifetime_jobs_ = InitializeRxGraphForJobScheduledEvents();
@@ -762,10 +770,10 @@ class EventManager::Impl {
     rxcpp::composite_subscription lifetime;
 
     if (!tracing_allowed_) {
-      LOG(WARNING) << "Tracing disabled by iorapd.perfetto.enable=false";
+      LOG(WARNING) << "Tracing disabled by system property";
     }
     if (!readahead_allowed_) {
-      LOG(WARNING) << "Readahead disabled by iorapd.readahead.enable=false";
+      LOG(WARNING) << "Readahead disabled by system property";
     }
 
     AppLaunchEventState initial_state{&perfetto_factory_,

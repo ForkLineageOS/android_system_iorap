@@ -89,6 +89,9 @@ cc_defaults {
         // libplatformprotos has an indirect dependency on full, causing compilation/linking
         // errors if we use lite
         "libprotobuf-cpp-full",
+
+        // phenotype flags support
+        "server_configurable_flags",
     ],
 
     // srcs: [":libprotobuf-internal-protos"],
