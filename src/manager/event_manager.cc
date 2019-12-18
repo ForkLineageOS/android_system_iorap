@@ -418,8 +418,10 @@ struct AppLaunchEventState {
     std::optional<db::AppLaunchHistoryModel> history = InsertDbLaunchHistory();
 
     // RecordDbLaunchHistory happens-after kIntentStarted
-    CHECK(history_id_subscriber_.has_value()) << "Logic error? "
-                                              << "Should always have a subscriber here.";
+    if (!history_id_subscriber_.has_value()) {
+      LOG(WARNING) << "Logic error? Should always have a subscriber here.";
+      return;
+    }
 
     // Ensure that the history id rx chain is terminated either with an error or with
     // the newly inserted app_launch_histories.id
