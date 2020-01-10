@@ -172,8 +172,9 @@ cc_binary {
     init_rc: [
         "iorapd.rc",
     ],
-    // iorapd fork+execs into iorap.prefetcherd
+    // iorapd fork+execs into iorap.prefetcherd and iorap.cmd.compiler
     required: [
+        "iorap.cmd.compiler",
         "iorap.prefetcherd",
     ],
 }
