@@ -132,6 +132,7 @@ cc_defaults {
         "libiorap-perfetto",
         "libiorap-prefetcher",
         "libiorap-db",
+        "libiorap-maintenance",
     ],
     defaults: [
         "libiorap-perfetto-default-dependencies",

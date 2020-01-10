@@ -20,6 +20,7 @@
 #include "db/app_component_name.h"
 #include "db/file_models.h"
 #include "db/models.h"
+#include "maintenance/controller.h"
 #include "manager/event_manager.h"
 #include "perfetto/rx_producer.h"
 #include "prefetcher/read_ahead.h"
@@ -799,6 +800,25 @@ class EventManager::Impl {
     return lifetime;
   }
 
+  // Runs the maintenance code to compile perfetto traces to compiled
+  // trace.
+  void StartMaintenance(bool output_text,
+                        std::optional<std::string> inode_textcache,
+                        bool verbose,
+                        bool recompile,
+                        uint64_t min_traces) {
+    db::DbHandle db{db::SchemaModel::GetSingleton()};
+    maintenance::ControllerParameters params{
+      output_text,
+      inode_textcache,
+      verbose,
+      recompile,
+      min_traces,
+      std::make_shared<maintenance::Exec>()};
+
+    maintenance::CompileAppsOnDevice(db, params);
+  }
+
   rxcpp::composite_subscription InitializeRxGraphForJobScheduledEvents() {
     LOG(VERBOSE) << "EventManager::InitializeRxGraphForJobScheduledEvents";
 
@@ -816,6 +836,12 @@ class EventManager::Impl {
       .tap([this](const RequestAndJobEvent& e) {
         LOG(VERBOSE) << "EventManager#JobScheduledEvent#tap(1) - job begins";
         this->NotifyProgress(e.first, TaskResult{TaskResult::State::kBegan});
+
+        StartMaintenance(/*output_text=*/false,
+                         /*inode_textcache=*/std::nullopt,
+                         /*verbose=*/false,
+                         /*recompile=*/false,
+                         /*min_traces=*/3);
 
         // TODO: probably this shouldn't be emitted until most of the usual DCHECKs
         // (for example, validate a job isn't already started, the request is not reused, etc).
