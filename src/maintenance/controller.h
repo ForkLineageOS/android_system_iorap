@@ -82,14 +82,18 @@ struct ControllerParameters {
 bool Compile(const std::string& db_path, const ControllerParameters& params);
 
 // Compile all activities in the package.
+// If the version is not given, an arbitrary package that has the same name is used.
 bool Compile(const std::string& db_path,
              const std::string& package_name,
+             int version,
              const ControllerParameters& params);
 
 // Compile trace for the activity.
+// If the version is not given, an arbitrary package has the same name is used.
 bool Compile(const std::string& db_path,
              const std::string& package_name,
              const std::string& activity_name,
+             int version,
              const ControllerParameters& params);
 // Visible for testing.
 bool CompileAppsOnDevice(const db::DbHandle& db, const ControllerParameters& params);
