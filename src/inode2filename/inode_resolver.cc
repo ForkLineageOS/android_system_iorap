@@ -13,6 +13,9 @@
 // limitations under the License.
 
 #include "inode2filename/inode_resolver.h"
+
+#include "common/cmd_utils.h"
+#include "inode2filename/out_of_process_inode_resolver.h"
 #include "inode2filename/search_directories.h"
 
 #include <android-base/logging.h>
@@ -23,6 +26,51 @@
 namespace rx = rxcpp;
 
 namespace iorap::inode2filename {
+
+std::vector<std::string> ToArgs(ProcessMode process_mode) {
+  const char* value = nullptr;
+
+  switch (process_mode) {
+    case ProcessMode::kInProcessDirect:
+      value = "in";
+      break;
+    case ProcessMode::kInProcessIpc:
+      value = "in-ipc";
+      break;
+    case ProcessMode::kOutOfProcessIpc:
+      value = "out";
+      break;
+  }
+
+  std::vector<std::string> args;
+  iorap::common::AppendNamedArg(args, "--process-mode", value);
+  return args;
+}
+
+std::vector<std::string> ToArgs(VerifyKind verify_kind) {
+  const char* value = nullptr;
+
+  switch (verify_kind) {
+    case VerifyKind::kNone:
+      value = "none";
+      break;
+    case VerifyKind::kStat:
+      value = "stat";
+      break;
+  }
+
+  std::vector<std::string> args;
+  iorap::common::AppendNamedArg(args, "--verify", value);
+  return args;
+}
+
+std::vector<std::string> ToArgs(const InodeResolverDependencies& deps) {
+  std::vector<std::string> args = ToArgs(*static_cast<const DataSourceDependencies*>(&deps));
+  iorap::common::AppendArgsRepeatedly(args, ToArgs(deps.process_mode));
+  iorap::common::AppendArgsRepeatedly(args, ToArgs(deps.verify));
+
+  return args;
+}
 
 struct InodeResolver::Impl {
   Impl(InodeResolverDependencies dependencies)
@@ -50,19 +98,29 @@ InodeResolver::InodeResolver(InodeResolverDependencies dependencies,
 }
 
 std::shared_ptr<InodeResolver> InodeResolver::Create(InodeResolverDependencies dependencies) {
-  // TODO: proxy resolver for IPC/Out-of-Process.
-  DCHECK(dependencies.process_mode == ProcessMode::kInProcessDirect);
-
-  return std::shared_ptr<InodeResolver>{new InodeResolver{std::move(dependencies)}};
+  if (dependencies.process_mode == ProcessMode::kInProcessDirect) {
+    return std::shared_ptr<InodeResolver>{
+        new InodeResolver{std::move(dependencies)}};
+  } else if (dependencies.process_mode == ProcessMode::kOutOfProcessIpc) {
+    return std::shared_ptr<InodeResolver>{
+        new OutOfProcessInodeResolver{std::move(dependencies)}};
+  } else {
+    CHECK(false);
+  }
+  return nullptr;
 }
 
 std::shared_ptr<InodeResolver> InodeResolver::Create(InodeResolverDependencies dependencies,
                                                      std::shared_ptr<DataSource> data_source) {
-  // TODO: proxy resolver for IPC/Out-of-Process.
-  DCHECK(dependencies.process_mode == ProcessMode::kInProcessDirect);
-
-  return std::shared_ptr<InodeResolver>{
-      new InodeResolver{std::move(dependencies), std::move(data_source)}};
+  if (dependencies.process_mode == ProcessMode::kInProcessDirect) {
+    return std::shared_ptr<InodeResolver>{
+        new InodeResolver{std::move(dependencies), std::move(data_source)}};
+  } else if (dependencies.process_mode == ProcessMode::kOutOfProcessIpc) {
+    CHECK(false);  // directly providing a DataSource only makes sense in-process
+  } else {
+    CHECK(false);
+  }
+  return nullptr;
 }
 
 rxcpp::observable<InodeResult>
@@ -125,6 +183,14 @@ InodeResolver::~InodeResolver() {
   // std::unique_ptr requires complete types, but we hide the definition in the header.
   delete impl_;
   // XX: Does this work if we just force the dtor definition into the .cc file with a unique_ptr?
+}
+
+InodeResolverDependencies& InodeResolver::GetDependencies() {
+  return impl_->dependencies_;
+}
+
+const InodeResolverDependencies& InodeResolver::GetDependencies() const {
+  return impl_->dependencies_;
 }
 
 void InodeResolver::StartRecording() {

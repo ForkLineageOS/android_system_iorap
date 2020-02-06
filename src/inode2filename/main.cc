@@ -52,6 +52,10 @@ void Usage(char** argv) {
   std::cerr << "        log           Log human-readable, non-parsable format to stdout+logcat." << std::endl;
   std::cerr << "        textcache     Results are in the same format as system/extras/pagecache." << std::endl;
   std::cerr << "        ipc           Results are in a binary inter-process communications format" << std::endl;
+  std::cerr << "    --process-mode=,  Choose a process mode (default 'in'). Test-oriented." << std::endl;
+  std::cerr << "    -pm " << std::endl;
+  std::cerr << "        in            Use a single process to do the work in." << std::endl;
+  std::cerr << "        out           Out-of-process work (forks into a -pm=in)." << std::endl;
   std::cerr << "    --verify=,-vy     Verification modes for the data source (default 'stat')." << std::endl;
   std::cerr << "        stat          Use stat(2) call to validate data inodes are up-to-date. " << std::endl;
   std::cerr << "        none          Trust that the data-source is up-to-date without checking." << std::endl;
@@ -104,6 +108,15 @@ std::optional<VerifyKind> ParseVerifyKind(std::string_view str) {
     return VerifyKind::kNone;
   } else if (str == "stat") {
     return VerifyKind::kStat;
+  }
+  return std::nullopt;
+}
+
+std::optional<ProcessMode> ParseProcessMode(std::string_view str) {
+  if (str == "in") {
+    return ProcessMode::kInProcessDirect;
+  } else if (str == "out") {
+    return ProcessMode::kOutOfProcessIpc;
   }
   return std::nullopt;
 }
@@ -184,6 +197,7 @@ int main(int argc, char** argv) {
   DataSourceKind data_source = DataSourceKind::kDiskScan;
   OutputFormatKind output_format = OutputFormatKind::kLog;
   VerifyKind verify = VerifyKind::kStat;
+  ProcessMode process_mode = ProcessMode::kInProcessDirect;
 
   std::optional<std::string> output_filename;
   std::optional<int /*fd*/> in_fd, out_fd;  // input-output file descriptors [for fork+exec].
@@ -229,7 +243,19 @@ int main(int argc, char** argv) {
                                              /*inout*/&arg);
                val) {
       output_filename = *val;
-    } else if (auto val = ParseNamedArgument({"--output-format=", "-of"},
+    } else if (auto val = ParseNamedArgument({"--process-mode=", "-pm"},
+                                             argstr,
+                                             arg_next,
+                                             /*inout*/&arg);
+               val) {
+      auto pm = ParseProcessMode(*val);
+      if (!pm) {
+        std::cerr << "Invalid --process-mode=<value>" << std::endl;
+        return 1;
+      }
+      process_mode = *pm;
+    }
+    else if (auto val = ParseNamedArgument({"--output-format=", "-of"},
                                              argstr,
                                              arg_next,
                                              /*inout*/&arg);
@@ -312,6 +338,9 @@ int main(int argc, char** argv) {
 
     LOG(VERBOSE) << "Dumping all inodes? " << all;
   }
+  // else use
+  // $> ANDROID_LOG_TAGS='*:d' iorap.inode2filename <args>
+  // which will enable arbitrary log levels.
 
   // Useful to attach a debugger...
   // 1) $> inode2filename -w <args>
@@ -327,11 +356,11 @@ int main(int argc, char** argv) {
   InodeResolverDependencies ir_dependencies;
   // Passed from command-line.
   ir_dependencies.data_source = data_source;
+  ir_dependencies.process_mode = process_mode;
   ir_dependencies.root_directories = root_directories;
   ir_dependencies.text_cache_filename = text_cache_filename;
   ir_dependencies.verify = verify;
   // Hardcoded.
-  ir_dependencies.process_mode = ProcessMode::kInProcessDirect;  // TODO: others.
   ir_dependencies.system_call = injector.get<SystemCall*>();
 
   std::shared_ptr<InodeResolver> inode_resolver =
@@ -354,6 +383,10 @@ int main(int argc, char** argv) {
         fout << "\033[1;32m[OK]\033[0m  "
              << result.inode
              << " \"" << result.data.value() << "\"" << std::endl;
+      } else if (output_format == OutputFormatKind::kIpc) {
+        fout << "K "
+             << result.inode
+             << " " << result.data.value() << std::endl;
       } else if (output_format == OutputFormatKind::kTextCache) {
         // Same format as TextCacheDataSource (system/extras/pagecache/pagecache.py -d)
         //   "$device_number $inode $filesize $filename..."
@@ -373,7 +406,12 @@ int main(int argc, char** argv) {
         fout << "\033[1;31m[ERR]\033[0m "
              << result.inode
              << " '" << *result.ErrorMessage() << "'" << std::endl;
-      } else if (output_format == OutputFormatKind::kTextCache) {
+      } else if (output_format == OutputFormatKind::kIpc) {
+        fout << "E "
+             << result.inode
+             << " " << result.data.error() << std::endl;
+      }
+      else if (output_format == OutputFormatKind::kTextCache) {
         // Don't add bad results to the textcache. They are dropped.
       } else {
         LOG(FATAL) << "Not implemented this kind of --output-format";

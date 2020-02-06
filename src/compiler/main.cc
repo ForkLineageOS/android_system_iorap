@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "common/cmd_utils.h"
 #include "common/debug.h"
 #include "compiler/compiler.h"
 #include "inode2filename/inode_resolver.h"
@@ -156,7 +157,11 @@ int Main(int argc, char** argv) {
   ir_dependencies.root_directories.push_back("/product");
   ir_dependencies.root_directories.push_back("/metadata");
   // Hardcoded.
-  ir_dependencies.process_mode = ProcessMode::kInProcessDirect;  // TODO: others.
+  if (iorap::common::GetBoolEnvOrProperty("iorap.inode2filename.out_of_process", true)) {
+    ir_dependencies.process_mode = ProcessMode::kOutOfProcessIpc;
+  } else {
+    ir_dependencies.process_mode = ProcessMode::kInProcessDirect;
+  }
   ir_dependencies.system_call = /*borrowed*/system_call.get();
 
   int return_code = 0;

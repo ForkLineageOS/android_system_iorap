@@ -47,10 +47,14 @@ enum class VerifyKind {
   kStat,
 };
 
+std::vector<std::string> ToArgs(VerifyKind verify_kind);
+
 struct InodeResolverDependencies : public DataSourceDependencies {
   ProcessMode process_mode = ProcessMode::kInProcessDirect;
   VerifyKind verify{VerifyKind::kStat};  // Filter out results that aren't up-to-date with stat(2) ?
 };
+
+std::vector<std::string> ToArgs(const InodeResolverDependencies& deps);
 
 // Create an rx-observable chain that allows searching for inode->filename mappings given
 // a set of inode keys.
@@ -75,7 +79,7 @@ class InodeResolver : public std::enable_shared_from_this<InodeResolver> {
       FindFilenamesFromInodes(rxcpp::observable<Inode> inodes) const;
       // TODO: feels like we could turn this into a general helper?
   // Convenience function for above.
-  rxcpp::observable<InodeResult>
+  virtual rxcpp::observable<InodeResult>
       FindFilenamesFromInodes(std::vector<Inode> inodes) const;
 
   // Enumerate *all* inodes available from the data source, associating it with a filepath.
@@ -87,7 +91,7 @@ class InodeResolver : public std::enable_shared_from_this<InodeResolver> {
   //
   // Notes:
   // * If the observable is unsubscribed to prior to completion, searching will halt.
-  rxcpp::observable<InodeResult>
+  virtual rxcpp::observable<InodeResult>
       EmitAll() const;
 
   // Notifies the DataSource to begin recording.
@@ -100,7 +104,7 @@ class InodeResolver : public std::enable_shared_from_this<InodeResolver> {
   // The snapshot of data returned by e.g. #EmitAll would then not change outside of recording.
   void StopRecording();
 
-  ~InodeResolver();
+  virtual ~InodeResolver();
  private:
   struct Impl;
   Impl* impl_;
@@ -108,7 +112,8 @@ class InodeResolver : public std::enable_shared_from_this<InodeResolver> {
  protected:
   InodeResolver(InodeResolverDependencies dependencies);
   InodeResolver(InodeResolverDependencies dependencies, std::shared_ptr<DataSource> data_source);
-  InodeResolverDependencies dependencies_;
+  InodeResolverDependencies& GetDependencies();
+  const InodeResolverDependencies& GetDependencies() const;
 };
 
 }
