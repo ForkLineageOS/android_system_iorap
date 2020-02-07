@@ -100,7 +100,12 @@ int Main(int argc, char** argv) {
         std::cerr << "Missing --timestamp_limit_ns <value>" << std::endl;
         return 1;
       }
-      timestamp_limit_ns.push_back(std::stoul(arg_next, nullptr, 10));
+      uint64_t timestamp;
+      if (!::android::base::ParseUint<uint64_t>(arg_next, &timestamp)) {
+        std::cerr << "Invalid --timestamp-limit-ns "<< arg_next << std::endl;
+        return 1;
+      }
+      timestamp_limit_ns.push_back(timestamp);
       ++arg;
     } else {
       arg_input_filenames.push_back(argstr);
