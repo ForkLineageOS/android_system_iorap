@@ -32,6 +32,8 @@ enum class DataSourceKind {
   kBpf,
 };
 
+std::vector<std::string> ToArgs(DataSourceKind data_source_kind);
+
 struct DataSourceDependencies {
   DataSourceKind data_source = DataSourceKind::kDiskScan;
   borrowed<SystemCall*> system_call = nullptr;
@@ -41,6 +43,8 @@ struct DataSourceDependencies {
   // kTextCache-specific options. Other data sources ignore these fields.
   std::optional<std::string> text_cache_filename;
 };
+
+std::vector<std::string> ToArgs(const DataSourceDependencies& deps);
 
 class DataSource : std::enable_shared_from_this<DataSource> {
  public:

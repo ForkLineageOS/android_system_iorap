@@ -27,6 +27,7 @@
 #include "prefetcher/task_id.h"
 
 #include <android-base/chrono_utils.h>
+#include <android-base/strings.h>
 #include <android-base/properties.h>
 #include <rxcpp/rx.hpp>
 #include <server_configurable_flags/get_flags.h>
@@ -52,6 +53,41 @@ using perfetto::PerfettoStreamCommand;
 using perfetto::PerfettoTraceProto;
 
 using db::AppComponentName;
+
+struct PackageBlacklister {
+  // "x.y.z;foo.bar.baz" colon-separated list of substrings
+  PackageBlacklister(std::string blacklist_string) {
+    LOG(VERBOSE) << "Configuring package blacklister with string: " << blacklist_string;
+
+    std::vector<std::string> split = ::android::base::Split(blacklist_string, ";");
+
+    // Ignore any l/r whitespace or empty strings.
+    for (const std::string& s : split) {
+      std::string t = ::android::base::Trim(s);
+      if (!t.empty()) {
+        LOG(INFO) << "Blacklisted package: " << t << "; will not optimize.";
+        packages_.push_back(t);
+      }
+    }
+  }
+
+  PackageBlacklister() = default;
+
+  bool IsBlacklisted(const std::string& package_name) const {
+    return std::find(packages_.begin(), packages_.end(), package_name) != packages_.end();
+  }
+
+  bool IsBlacklisted(const AppComponentName& component_name) const {
+    return IsBlacklisted(component_name.package);
+  }
+
+  bool IsBlacklisted(const std::optional<AppComponentName>& component_name) const {
+    return component_name.has_value() && IsBlacklisted(component_name->package);
+  }
+
+ private:
+  std::vector<std::string> packages_;
+};
 
 // Main logic of the #OnAppLaunchEvent scan method.
 //
@@ -92,6 +128,8 @@ struct AppLaunchEventState {
   std::optional<rxcpp::composite_subscription> rx_lifetime_;
   std::vector<rxcpp::composite_subscription> rx_in_flight_;
 
+  PackageBlacklister package_blacklister_{};
+
   borrowed<perfetto::RxProducerFactory*> perfetto_factory_;  // not null
   borrowed<observe_on_one_worker*> thread_;  // not null
   borrowed<observe_on_one_worker*> io_thread_;  // not null
@@ -100,6 +138,7 @@ struct AppLaunchEventState {
   explicit AppLaunchEventState(borrowed<perfetto::RxProducerFactory*> perfetto_factory,
                                bool allowed_readahead,
                                bool allowed_tracing,
+                               PackageBlacklister package_blacklister,
                                borrowed<observe_on_one_worker*> thread,
                                borrowed<observe_on_one_worker*> io_thread,
                                borrowed<AsyncPool*> async_pool)
@@ -110,6 +149,8 @@ struct AppLaunchEventState {
 
     allowed_readahead_ = allowed_readahead;
     allowed_tracing_ = allowed_tracing;
+
+    package_blacklister_ = package_blacklister;
 
     thread_ = thread;
     DCHECK(thread_ != nullptr);
@@ -138,6 +179,18 @@ struct AppLaunchEventState {
 
     switch (event.type) {
       case Type::kIntentStarted: {
+        const std::string& package_name = event.intent_proto->component().package_name();
+        const std::string& class_name = event.intent_proto->component().class_name();
+        AppComponentName component_name{package_name, class_name};
+        component_name = component_name.Canonicalize();
+        component_name_ = component_name;
+
+        if (package_blacklister_.IsBlacklisted(component_name)) {
+          LOG(DEBUG) << "kIntentStarted: package " << component_name.package
+                     << " ignored due to blacklisting.";
+          break;
+        }
+
         // Create a new history ID chain for each new app start-up sequence.
         auto history_id_observable = rxcpp::observable<>::create<int>(
           [&](rxcpp::subscriber<int> subscriber) {
@@ -160,11 +213,6 @@ struct AppLaunchEventState {
           break;
         }
 
-        const std::string& package_name = event.intent_proto->component().package_name();
-        const std::string& class_name = event.intent_proto->component().class_name();
-        AppComponentName component_name{package_name, class_name};
-        component_name_ = component_name.Canonicalize();
-
         if (allowed_readahead_) {
           StartReadAhead(sequence_id_, component_name);
         }
@@ -181,6 +229,12 @@ struct AppLaunchEventState {
         break;
       }
       case Type::kIntentFailed:
+        if (package_blacklister_.IsBlacklisted(component_name_)) {
+          LOG(VERBOSE) << "kIntentFailed: package " << component_name_->package
+                       << " ignored due to blacklisting.";
+          break;
+        }
+
         AbortTrace();
         AbortReadAhead();
 
@@ -192,6 +246,24 @@ struct AppLaunchEventState {
 
         break;
       case Type::kActivityLaunched: {
+        const std::string& title = event.activity_record_proto->identifier().title();
+        if (!AppComponentName::HasAppComponentName(title)) {
+          // Proto comment claim this is sometimes a window title.
+          // We need the actual 'package/component' here, so just ignore it if it's a title.
+          LOG(WARNING) << "App launched without a component name: " << event;
+          break;
+        }
+
+        AppComponentName component_name = AppComponentName::FromString(title);
+        component_name = component_name.Canonicalize();
+        component_name_ = component_name;
+
+        if (package_blacklister_.IsBlacklisted(component_name_)) {
+          LOG(VERBOSE) << "kActivityLaunched: package " << component_name_->package
+                       << " ignored due to blacklisting.";
+          break;
+        }
+
         // Cancel tracing for warm/hot.
         // Restart tracing if the activity was unexpected.
 
@@ -205,17 +277,6 @@ struct AppLaunchEventState {
         } else if (!IsTracing() || !IsReadAhead()) {  // and the temperature is Cold.
           // Start late trace when intent didn't have a component name
           LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent need to start new trace";
-
-          const std::string& title = event.activity_record_proto->identifier().title();
-          if (!AppComponentName::HasAppComponentName(title)) {
-            // Proto comment claim this is sometimes a window title.
-            // We need the actual 'package/component' here, so just ignore it if it's a title.
-            LOG(WARNING) << "App launched without a component name: " << event;
-            break;
-          }
-
-          AppComponentName component_name = AppComponentName::FromString(title);
-          component_name_ = component_name.Canonicalize();
 
           if (allowed_readahead_ && !IsReadAhead()) {
             StartReadAhead(sequence_id_, component_name);
@@ -235,6 +296,12 @@ struct AppLaunchEventState {
         break;
       }
       case Type::kActivityLaunchFinished:
+        if (package_blacklister_.IsBlacklisted(component_name_)) {
+          LOG(VERBOSE) << "kActivityLaunchFinished: package " << component_name_->package
+                       << " ignored due to blacklisting.";
+          break;
+        }
+
         if (event.timestamp_nanos >= 0) {
            total_time_ns_ = event.timestamp_nanos;
         }
@@ -249,11 +316,23 @@ struct AppLaunchEventState {
         FinishReadAhead();
         break;
       case Type::kActivityLaunchCancelled:
+        if (package_blacklister_.IsBlacklisted(component_name_)) {
+          LOG(VERBOSE) << "kActivityLaunchCancelled: package " << component_name_->package
+                       << " ignored due to blacklisting.";
+          break;
+        }
+
         // Abort tracing.
         AbortTrace();
         AbortReadAhead();
         break;
       case Type::kReportFullyDrawn: {
+        if (package_blacklister_.IsBlacklisted(component_name_)) {
+          LOG(VERBOSE) << "kReportFullyDrawn: package " << component_name_->package
+                       << " ignored due to blacklisting.";
+          break;
+        }
+
         if (!recent_history_id_) {
           LOG(WARNING) << "Dangling kReportFullyDrawn event";
           return;
@@ -728,6 +807,19 @@ class EventManager::Impl {
         "iorap_readahead_enable",
         ::android::base::GetProperty("iorapd.readahead.enable", /*default*/"false")) == "true";
 
+    package_blacklister_ = PackageBlacklister{
+        /* Colon-separated string list of blacklisted packages, e.g.
+         * "foo.bar.baz;com.fake.name" would blacklist {"foo.bar.baz", "com.fake.name"} packages.
+         *
+         * Blacklisted packages are ignored by iorapd.
+         */
+        server_configurable_flags::GetServerConfigurableFlag(
+            ph_namespace,
+            "iorap_blacklisted_packages",
+            ::android::base::GetProperty("iorapd.blacklist_packages",
+                                         /*default*/""))
+    };
+
     rx_lifetime_ = InitializeRxGraph();
     rx_lifetime_jobs_ = InitializeRxGraphForJobScheduledEvents();
   }
@@ -782,6 +874,7 @@ class EventManager::Impl {
     AppLaunchEventState initial_state{&perfetto_factory_,
                                       readahead_allowed_,
                                       tracing_allowed_,
+                                      package_blacklister_,
                                       &worker_thread2_,
                                       &io_thread_,
                                       &async_pool_};
@@ -910,6 +1003,8 @@ class EventManager::Impl {
 
   perfetto::RxProducerFactory& perfetto_factory_;
   bool tracing_allowed_{true};
+
+  PackageBlacklister package_blacklister_{};
 
   std::weak_ptr<TaskResultCallbacks> callbacks_;  // avoid cycles with weakptr.
 

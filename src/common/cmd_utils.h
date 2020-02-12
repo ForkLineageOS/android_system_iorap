@@ -15,6 +15,7 @@
 #ifndef IORAP_SRC_COMMON_CMD_UTILS_H_
 #define IORAP_SRC_COMMON_CMD_UTILS_H_
 
+#include <android-base/parsebool.h>
 #include <android-base/properties.h>
 
 #include <iostream>
@@ -63,6 +64,22 @@ void AppendArgs(std::vector<std::string>& argv,
   AppendArgs(argv, value2);
 }
 
+// Appends a named argument to the argv.
+//
+// For example if <name> is "--property" and <value> is int(200):
+// the string "--property=200" is appended to the argv.
+template <class T, class T2>
+void AppendNamedArg(std::vector<std::string>& argv,
+                    const T& name,
+                    const T2& value) {
+  std::stringstream ss;
+  ss << name;
+  ss << "=";
+  ss << value;
+
+  argv.push_back(ss.str());
+}
+
 // Appends args from a vector to the argv repeatedly to argv.
 //
 // For example, if <args> is "--timestamp" and <values> is [100, 200].
@@ -88,6 +105,19 @@ void AppendArgsRepeatedly(std::vector<std::string>& argv,
   }
 }
 
+// Appends a named argument to the argv repeatedly with different values.
+//
+// For example if <name> is "--property" and <value> is [int(200), int(400)]:
+// the strings "--property=200" and "--property=400" are both appended to the argv.
+template <class T, class T2>
+void AppendNamedArgRepeatedly(std::vector<std::string>& argv,
+                              const T& name,
+                              const std::vector<T2>& values) {
+  for (const T2& v :values) {
+    AppendNamedArg(argv, name, v);
+  }
+}
+
 // Get the value of the property.
 // Firstly, try to find the environment variable. If it does not exist,
 // try to get the property. If neither, use the default value..
@@ -105,6 +135,34 @@ inline std::string GetEnvOrProperty(const std::string& prop, const std::string& 
     return std::string(env);
   }
   return ::android::base::GetProperty(prop, default_val);
+}
+
+// Get the boolean value of the property.
+// Firstly, try to find the environment variable. If it does not exist,
+// try to get the property. If neither, use the default value..
+//
+// For example, for prop foo.bar.baz, it will first check for
+// FOO_BAR_BAZ environment variable.
+inline bool GetBoolEnvOrProperty(const std::string& prop, bool default_val) {
+  std::string env_str = prop;
+  // a.b.c -> a_b_c
+  std::replace(env_str.begin(), env_str.end(), '.', '_');
+  // a_b_c -> A_B_C
+  std::transform(env_str.begin(), env_str.end(), env_str.begin(), ::toupper);
+  char *env = getenv(env_str.c_str());
+  if (env) {
+    using ::android::base::ParseBoolResult;
+
+    switch (::android::base::ParseBool(env)) {
+      case ParseBoolResult::kError:
+        break;
+      case ParseBoolResult::kFalse:
+        return false;
+      case ParseBoolResult::kTrue:
+        return true;
+    }
+  }
+  return ::android::base::GetBoolProperty(prop, default_val);
 }
 
 }   // namespace iorap::common

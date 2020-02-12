@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "inode2filename/data_source.h"
+
+#include "common/cmd_utils.h"
 #include "inode2filename/inode_resolver.h"
 #include "inode2filename/search_directories.h"
 
@@ -23,6 +26,40 @@
 namespace rx = rxcpp;
 
 namespace iorap::inode2filename {
+
+std::vector<std::string> ToArgs(DataSourceKind data_source_kind) {
+  const char* value = nullptr;
+
+  switch (data_source_kind) {
+    case DataSourceKind::kDiskScan:
+      value = "diskscan";
+      break;
+    case DataSourceKind::kTextCache:
+      value = "textcache";
+      break;
+    case DataSourceKind::kBpf:
+      value = "bpf";
+      break;
+  }
+
+  std::vector<std::string> args;
+  iorap::common::AppendNamedArg(args, "--data-source", value);
+  return args;
+}
+
+std::vector<std::string> ToArgs(const DataSourceDependencies& deps) {
+  std::vector<std::string> args;
+
+  iorap::common::AppendArgsRepeatedly(args, ToArgs(deps.data_source));
+  // intentionally skip system_call; it does not have a command line equivalent
+  iorap::common::AppendNamedArgRepeatedly(args, "--root", deps.root_directories);
+
+  if (deps.text_cache_filename) {
+    iorap::common::AppendNamedArg(args, "--textcache", *(deps.text_cache_filename));
+  }
+
+  return args;
+}
 
 class DiskScanDataSource : public DataSource {
  public:
