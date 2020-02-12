@@ -106,7 +106,7 @@ struct ReadAhead::Impl {
   Impl(bool use_sockets) {
     // Flip this property to test in-process vs out-of-process for the prefetcher code.
     bool out_of_process =
-        ::android::base::GetBoolProperty("iorapd.readahead.out_of_process", /*default*/false);
+        ::android::base::GetBoolProperty("iorapd.readahead.out_of_process", /*default*/true);
 
     SessionKind session_kind =
         out_of_process ? SessionKind::kOutOfProcessIpc : SessionKind::kInProcessDirect;
