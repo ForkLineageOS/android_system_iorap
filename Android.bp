@@ -434,6 +434,9 @@ cc_binary {
 
   static_libs: [
   ],
+  required: [
+      "iorap.inode2filename",
+  ],
 }
 
 // Static libraries cannot export their dependencies,
