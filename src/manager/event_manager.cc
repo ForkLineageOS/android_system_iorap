@@ -810,14 +810,9 @@ class EventManager::Impl {
       worker_thread_(rxcpp::observe_on_new_thread()),
       worker_thread2_(rxcpp::observe_on_new_thread()),
       io_thread_(perfetto::ObserveOnNewIoThread()) {
-
-    android::base::Timer timer{};
-    version_map_ = binder::PackageVersionMap::Create();
-    std::chrono::milliseconds duration_ms = timer.duration();
-    LOG(ERROR) << " Got versions for "
-               << version_map_->Size()
-               <<" packages in "
-               << duration_ms.count() << "ms";
+    // Try to create version map
+    RetryCreateVersionMap(/*timeout*/std::chrono::seconds(60),
+                          /*interval*/std::chrono::seconds(1));
 
     // TODO: read all properties from one config class.
     // PH properties do not work if they contain ".". "_" was instead used here.
@@ -846,6 +841,31 @@ class EventManager::Impl {
 
     rx_lifetime_ = InitializeRxGraph();
     rx_lifetime_jobs_ = InitializeRxGraphForJobScheduledEvents();
+  }
+
+  void RetryCreateVersionMap(std::chrono::seconds timeout,
+                             std::chrono::seconds interval) {
+    android::base::Timer timer{};
+    int64_t count = 0;
+    version_map_ = binder::PackageVersionMap::Create();
+    while (version_map_ == nullptr) {
+      std::this_thread::sleep_for(interval);
+      LOG(WARNING) << "Retry to create version map: " << ++count;
+      version_map_ = binder::PackageVersionMap::Create();
+      if (count * interval >= timeout) {
+        LOG(FATAL) << "Fail to create version map in "
+                   << timeout.count()
+                   << " seconds.";
+        abort();
+        break;
+      }
+    }
+    std::chrono::milliseconds duration_ms = timer.duration();
+    LOG(DEBUG) << "Got versions for "
+               << version_map_->Size()
+               << " packages in "
+               << duration_ms.count()
+               << "ms";
   }
 
   void SetTaskResultCallbacks(std::shared_ptr<TaskResultCallbacks> callbacks) {
