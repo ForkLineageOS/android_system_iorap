@@ -24,7 +24,7 @@ namespace iorap::db {
 struct VersionedComponentName {
   VersionedComponentName(std::string package,
                          std::string activity,
-                         std::optional<int> version)
+                         int64_t version)
     : package_{std::move(package)},
       activity_{std::move(activity)},
       version_{version} {
@@ -38,23 +38,18 @@ struct VersionedComponentName {
     return activity_;
   }
 
-  std::optional<int> GetVersion() const {
+  int GetVersion() const {
     return version_;
   }
 
  private:
   std::string package_;
   std::string activity_;
-  std::optional<int> version_;
+  int64_t version_;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const VersionedComponentName& vcn) {
-  os << vcn.GetPackage() << "/" << vcn.GetActivity() << "@";
-  if (vcn.GetVersion()) {
-    os << "none";
-  } else {
-    os << *vcn.GetVersion();
-  }
+  os << vcn.GetPackage() << "/" << vcn.GetActivity() << "@" << vcn.GetVersion();
   return os;
 }
 

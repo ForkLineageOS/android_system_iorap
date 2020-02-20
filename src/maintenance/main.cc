@@ -35,6 +35,7 @@ void Usage(char** argv) {
   std::cerr << "" << std::endl;
   std::cerr << "  Optional flags:" << std::endl;
   std::cerr << "    --package $,-p $           Package name." << std::endl;
+  std::cerr << "    --version $,-ve $          Package version." << std::endl;
   std::cerr << "    --activity $,-a $          Activity name." << std::endl;
   std::cerr << "    --inode-textcache $,-it $  Resolve inode->filename from textcache." << std::endl;
   std::cerr << "    --help,-h                  Print this Usage." << std::endl;
@@ -59,6 +60,7 @@ int Main(int argc, char** argv){
 
   std::vector<std::string> arg_input_filenames;
   std::optional<std::string> arg_package;
+  int arg_version = -1;
   std::optional<std::string> arg_activity;
   std::optional<std::string> arg_inode_textcache;
   bool recompile = false;
@@ -79,6 +81,18 @@ int Main(int argc, char** argv){
         return 1;
       }
       arg_package = arg_next;
+      ++arg;
+    } else if (argstr == "--version" || argstr == "-ve") {
+      if (!has_arg_next) {
+        std::cerr << "Missing --version <value>" << std::endl;
+        return 1;
+      }
+      int version;
+      if (!android::base::ParseInt<int>(arg_next, &version)) {
+        std::cerr << "Invalid --version " << arg_next << std::endl;
+        return 1;
+      }
+      arg_version = version;
       ++arg;
     } else if (argstr == "--activity" || argstr == "-a") {
       if (!has_arg_next) {
@@ -144,9 +158,10 @@ int Main(int argc, char** argv){
     ret_code = !Compile(std::move(db),
                         std::move(*arg_package),
                         std::move(*arg_activity),
+                        arg_version,
                         params);
   } else if (arg_package) {
-    ret_code = !Compile(std::move(db), std::move(*arg_package), params);
+    ret_code = !Compile(std::move(db), std::move(*arg_package), arg_version, params);
   } else {
     ret_code = !Compile(std::move(db), params);
   }
