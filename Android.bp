@@ -108,8 +108,6 @@ cc_library_static {
     srcs: [
         ":iorap-aidl",
         "src/binder/iiorap_impl.cc",
-        "src/binder/package_manager_remote.cc",
-        "src/binder/package_version_map.cc",
     ],
     shared_libs: [
         "libbinder",
@@ -127,10 +125,10 @@ cc_library_static {
     ],
 }
 
+
 cc_defaults {
     name: "libiorap-manager-default-dependencies",
     static_libs: [
-        "libiorap-binder",
         "libiorap-perfetto",
         "libiorap-prefetcher",
         "libiorap-db",
@@ -675,7 +673,6 @@ cc_defaults {
     include_dirs: [],
 
     static_libs: [
-        "libiorap-binder",
         "libiorap-compiler",
         "libiorap-db",
     ],

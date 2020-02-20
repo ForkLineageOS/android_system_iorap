@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include "binder/package_version_map.h"
 #include "common/debug.h"
 #include "common/expected.h"
 #include "common/rx_async.h"
@@ -22,7 +21,6 @@
 #include "db/file_models.h"
 #include "db/models.h"
 #include "maintenance/controller.h"
-#include "maintenance/db_cleaner.h"
 #include "manager/event_manager.h"
 #include "perfetto/rx_producer.h"
 #include "prefetcher/read_ahead.h"
@@ -37,8 +35,6 @@
 #include <atomic>
 #include <filesystem>
 #include <functional>
-#include <type_traits>
-#include <unordered_map>
 #include <utils/Trace.h>
 
 using rxcpp::observe_on_one_worker;
@@ -93,8 +89,6 @@ struct PackageBlacklister {
   std::vector<std::string> packages_;
 };
 
-using PackageVersionMap = std::unordered_map<std::string, int64_t>;
-
 // Main logic of the #OnAppLaunchEvent scan method.
 //
 // All functions are called from the same thread as the event manager
@@ -141,16 +135,13 @@ struct AppLaunchEventState {
   borrowed<observe_on_one_worker*> io_thread_;  // not null
   borrowed<AsyncPool*> async_pool_;  // not null
 
-  std::shared_ptr<binder::PackageVersionMap> version_map_;
-
   explicit AppLaunchEventState(borrowed<perfetto::RxProducerFactory*> perfetto_factory,
                                bool allowed_readahead,
                                bool allowed_tracing,
                                PackageBlacklister package_blacklister,
                                borrowed<observe_on_one_worker*> thread,
                                borrowed<observe_on_one_worker*> io_thread,
-                               borrowed<AsyncPool*> async_pool,
-                               std::shared_ptr<binder::PackageVersionMap> version_map)
+                               borrowed<AsyncPool*> async_pool)
     : read_ahead_{std::make_shared<prefetcher::ReadAhead>()}
   {
     perfetto_factory_ = perfetto_factory;
@@ -169,9 +160,6 @@ struct AppLaunchEventState {
 
     async_pool_ = async_pool;
     DCHECK(async_pool_ != nullptr);
-
-    version_map_ = version_map;
-    DCHECK(version_map_ != nullptr);
   }
 
   // Updates the values in this struct only as a side effect.
@@ -371,12 +359,10 @@ struct AppLaunchEventState {
     // Firstly, try to find the compiled trace from sqlite.
     android::base::Timer timer{};
     db::DbHandle db{db::SchemaModel::GetSingleton()};
-    int version = version_map_->GetOrQueryPackageVersion(component_name.package);
-    db::VersionedComponentName vcn{component_name.package,
-                                   component_name.activity_name,
-                                   version};
     std::optional<db::PrefetchFileModel> compiled_trace =
-          db::PrefetchFileModel::SelectByVersionedComponentName(db, vcn);
+        db::PrefetchFileModel::SelectByPackageNameActivityName(db,
+                                                               component_name.package,
+                                                               component_name.activity_name);
 
     std::chrono::milliseconds duration_ms = timer.duration();
     LOG(DEBUG) << "EventManager: Looking up compiled trace done in "
@@ -485,10 +471,9 @@ struct AppLaunchEventState {
              LOG(VERBOSE) << "StartTracing -- PerfettoTraceProto received (2)";
            });
 
-    int version = version_map_->GetOrQueryPackageVersion(component_name_->package);
     db::VersionedComponentName versioned_component_name{component_name.package,
                                                         component_name.activity_name,
-                                                        version};
+                                                        /*version*/std::nullopt};  // TODO: version
     lifetime = RxAsync::SubscribeAsync(*async_pool_,
         std::move(stream_via_threads),
         /*on_next*/[versioned_component_name]
@@ -619,11 +604,10 @@ struct AppLaunchEventState {
 
     using namespace iorap::db;
 
-    int version = version_map_->GetOrQueryPackageVersion(component_name_->package);
     std::optional<ActivityModel> activity =
         ActivityModel::SelectOrInsert(db,
                                       component_name_->package,
-                                      version,
+                                      /*version*/std::nullopt,
                                       component_name_->activity_name);
 
     if (!activity) {
@@ -811,14 +795,6 @@ class EventManager::Impl {
       worker_thread2_(rxcpp::observe_on_new_thread()),
       io_thread_(perfetto::ObserveOnNewIoThread()) {
 
-    android::base::Timer timer{};
-    version_map_ = binder::PackageVersionMap::Create();
-    std::chrono::milliseconds duration_ms = timer.duration();
-    LOG(ERROR) << " Got versions for "
-               << version_map_->Size()
-               <<" packages in "
-               << duration_ms.count() << "ms";
-
     // TODO: read all properties from one config class.
     // PH properties do not work if they contain ".". "_" was instead used here.
     const char* ph_namespace = "runtime_native_boot";
@@ -901,8 +877,7 @@ class EventManager::Impl {
                                       package_blacklister_,
                                       &worker_thread2_,
                                       &io_thread_,
-                                      &async_pool_,
-                                      version_map_};
+                                      &async_pool_};
     app_launch_events_
       .subscribe_on(worker_thread_)
       .scan(std::move(initial_state),
@@ -925,12 +900,7 @@ class EventManager::Impl {
                         bool verbose,
                         bool recompile,
                         uint64_t min_traces) {
-    // Update the version map.
-    version_map_->Update();
-    // Cleanup the obsolete data in the database.
     db::DbHandle db{db::SchemaModel::GetSingleton()};
-    maintenance::CleanUpDatabase(db, version_map_);
-    // Compilation
     maintenance::ControllerParameters params{
       output_text,
       inode_textcache,
@@ -1057,9 +1027,6 @@ class EventManager::Impl {
 
   rxcpp::composite_subscription rx_lifetime_;  // app launch events
   rxcpp::composite_subscription rx_lifetime_jobs_;  // job scheduled events
-
-  // package version map
-  std::shared_ptr<binder::PackageVersionMap> version_map_;
 
 //INTENTIONAL_COMPILER_ERROR_HERE:
   // FIXME:

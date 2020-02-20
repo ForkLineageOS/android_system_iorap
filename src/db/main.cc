@@ -54,8 +54,6 @@ void error_log_sqlite_callback(void *pArg, int iErrCode, const char *zMsg) {
   LOG(ERROR) << "SQLite error (" << iErrCode << "): " << zMsg;
 }
 
-const constexpr int64_t kNoVersion = -1;
-
 int Main(int argc, char** argv) {
   // Go to system logcat + stderr when running from command line.
   android::base::InitLogging(argv, iorap::common::StderrAndLogdLogger{android::base::SYSTEM});
@@ -188,7 +186,7 @@ int Main(int argc, char** argv) {
       std::optional<ActivityModel> activity =
           ActivityModel::SelectOrInsert(db,
                                         component_name.package,
-                                        kNoVersion,
+                                        /*version*/std::nullopt,
                                         component_name.activity_name);
       DCHECK(activity.has_value());
       LOG(DEBUG) << "Component selected/inserted: " << *activity;
@@ -206,7 +204,7 @@ int Main(int argc, char** argv) {
       std::optional<ActivityModel> activity =
           ActivityModel::SelectOrInsert(db,
                                         component_name.package,
-                                        kNoVersion,
+                                        /*version*/std::nullopt,
                                         component_name.activity_name);
 
       DCHECK(activity.has_value());

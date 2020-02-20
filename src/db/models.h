@@ -15,14 +15,8 @@
 #ifndef IORAP_SRC_DB_MODELS_H_
 #define IORAP_SRC_DB_MODELS_H_
 
-#include "clean_up.h"
-#include "file_models.h"
-
 #include <android-base/logging.h>
-#include <utils/String8.h>
 
-#include <filesystem>
-#include <iostream>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -33,8 +27,6 @@
 #include <sqlite3.h>
 
 namespace iorap::db {
-
-const constexpr int kDbVersion = 2;
 
 struct SqliteDbDeleter {
   void operator()(sqlite3* db) {
@@ -376,32 +368,14 @@ class SchemaModel : public Model {
     }
 
     sqlite3* db = nullptr;
-    bool is_deprecated = false;
     if (location != ":memory:") {
       // Try to open DB if it already exists.
       rc = sqlite3_open_v2(location.c_str(), /*out*/&db, SQLITE_OPEN_READWRITE, /*vfs*/nullptr);
 
       if (rc == SQLITE_OK) {
         LOG(INFO) << "Opened existing database at '" << location << "'";
-        SchemaModel schema{DbHandle{db}, location};
-        if (schema.Version() == kDbVersion) {
-          return schema;
-        } else {
-          LOG(DEBUG) << "The version is old, reinit the db."
-                     << " old version is "
-                     << schema.Version()
-                     << " and new version is "
-                     << kDbVersion;
-          CleanUpFilesForDb(schema.db());
-          is_deprecated = true;
-       }
+        return SchemaModel{DbHandle{db}, location};
       }
-    }
-
-    if (is_deprecated) {
-      // Remove the db and recreate it.
-      // TODO: migrate to a newer version without deleting the old one.
-      std::filesystem::remove(location.c_str());
     }
 
     // Create a new DB if one didn't exist already.
@@ -478,11 +452,12 @@ class SchemaModel : public Model {
         CREATE TABLE schema_versions(
             version INTEGER NOT NULL
         );
+        INSERT INTO schema_versions VALUES(1);
 
         CREATE TABLE packages(
             id INTEGER NOT NULL,
             name TEXT NOT NULL,
-            version INTEGER NOT NULL,
+            version INTEGER,
 
             PRIMARY KEY(id)
         );
@@ -493,7 +468,7 @@ class SchemaModel : public Model {
             package_id INTEGER NOT NULL,
 
             PRIMARY KEY(id),
-            FOREIGN KEY (package_id) REFERENCES packages (id) ON DELETE CASCADE
+            FOREIGN KEY (package_id) REFERENCES packages (id)
         );
 
         CREATE TABLE app_launch_histories(
@@ -510,7 +485,7 @@ class SchemaModel : public Model {
             -- absolute timestamp since epoch
             report_fully_drawn_ns INTEGER CHECK(report_fully_drawn_ns IS NULL or report_fully_drawn_ns >= 0),
 
-            FOREIGN KEY (activity_id) REFERENCES activities (id) ON DELETE CASCADE
+            FOREIGN KEY (activity_id) REFERENCES activities (id)
         );
 
         CREATE TABLE raw_traces(
@@ -518,7 +493,7 @@ class SchemaModel : public Model {
             history_id INTEGER NOT NULL,
             file_path TEXT NOT NULL,
 
-            FOREIGN KEY (history_id) REFERENCES app_launch_histories (id) ON DELETE CASCADE
+            FOREIGN KEY (history_id) REFERENCES app_launch_histories (id)
         );
 
         CREATE TABLE prefetch_files(
@@ -526,7 +501,7 @@ class SchemaModel : public Model {
           activity_id INTEGER NOT NULL,
           file_path TEXT NOT NULL,
 
-          FOREIGN KEY (activity_id) REFERENCES activities (id) ON DELETE CASCADE
+          FOREIGN KEY (activity_id) REFERENCES activities (id)
         );
 )SQLC0D3";
 
@@ -539,21 +514,6 @@ class SchemaModel : public Model {
 
     if (rc != SQLITE_OK) {
       LOG(FATAL) << "Failed to create tables: " << err_msg ? err_msg : "nullptr";
-    }
-
-    const char* sql_to_insert_schema_version = R"SQLC0D3(
-      INSERT INTO schema_versions VALUES(%d)
-      )SQLC0D3";
-    rc = sqlite3_exec(db().get(),
-                      android::String8::format(sql_to_insert_schema_version,
-                                               kDbVersion),
-                      /*callback*/nullptr,
-                      /*arg*/0,
-                      /*out*/&err_msg);
-
-    if (rc != SQLITE_OK) {
-      LOG(FATAL) << "Failed to insert the schema version: "
-                 << err_msg ? err_msg : "nullptr";
     }
   }
 
@@ -599,23 +559,6 @@ class PackageModel : public Model {
     return p;
   }
 
-  static std::optional<PackageModel> SelectByNameAndVersion(DbHandle db,
-                                                            const char* name,
-                                                            int version) {
-    ScopedLockDb lock{db};
-
-    std::string query =
-        "SELECT * FROM packages WHERE name = ?1 AND version = ?2 LIMIT 1;";
-    DbStatement stmt = DbStatement::Prepare(db, query, name, version);
-
-    PackageModel p{db};
-    if (!DbQueryBuilder::SelectOnce(stmt, p.id, p.name, p.version)) {
-      return std::nullopt;
-    }
-
-    return p;
-  }
-
   static std::vector<PackageModel> SelectAll(DbHandle db) {
     ScopedLockDb lock{db};
 
@@ -633,7 +576,7 @@ class PackageModel : public Model {
 
   static std::optional<PackageModel> Insert(DbHandle db,
                                             std::string name,
-                                            int version) {
+                                            std::optional<int> version) {
     const char* sql = "INSERT INTO packages (name, version) VALUES (?1, ?2);";
 
     std::optional<int> inserted_row_id =
@@ -650,21 +593,19 @@ class PackageModel : public Model {
     return p;
   }
 
-  bool Delete() {
-    const char* sql = "DELETE FROM packages WHERE id = ?";
-
-    return DbQueryBuilder::Delete(db(), sql, id);
-  }
-
   int id;
   std::string name;
-  int version;
+  std::optional<int> version;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const PackageModel& p) {
   os << "PackageModel{id=" << p.id << ",name=" << p.name << ",";
   os << "version=";
-  os << p.version;
+  if (p.version) {
+    os << *p.version;
+  } else {
+    os << "(nullopt)";
+  }
   os << "}";
   return os;
 }
@@ -746,11 +687,9 @@ class ActivityModel : public Model {
   static std::optional<ActivityModel> SelectOrInsert(
       DbHandle db,
       std::string package_name,
-      int package_version,
+      std::optional<int> package_version,
       std::string activity_name) {
-    std::optional<PackageModel> package = PackageModel::SelectByNameAndVersion(db,
-                                                                               package_name.c_str(),
-                                                                               package_version);
+    std::optional<PackageModel> package = PackageModel::SelectByName(db, package_name.c_str());
     if (!package) {
       package = PackageModel::Insert(db, package_name, package_version);
       DCHECK(package.has_value());
@@ -953,8 +892,9 @@ class RawTraceModel : public Model {
  public:
 
   // Return raw_traces, sorted ascending by the id.
-  static std::vector<RawTraceModel> SelectByVersionedComponentName(DbHandle db,
-                                                                   VersionedComponentName vcn) {
+  static std::vector<RawTraceModel> SelectByPackageNameActivityName(DbHandle db,
+                                                                    std::string package_name,
+                                                                    std::string activity_name) {
     ScopedLockDb lock{db};
 
     const char* sql =
@@ -963,14 +903,10 @@ class RawTraceModel : public Model {
       "INNER JOIN app_launch_histories ON raw_traces.history_id = app_launch_histories.id "
       "INNER JOIN activities ON activities.id = app_launch_histories.activity_id "
       "INNER JOIN packages ON packages.id = activities.package_id "
-      "WHERE packages.name = ? AND activities.name = ? AND packages.version = ?"
+      "WHERE packages.name = ? AND activities.name = ? "
       "ORDER BY raw_traces.id ASC";
 
-    DbStatement stmt = DbStatement::Prepare(db,
-                                            sql,
-                                            vcn.GetPackage(),
-                                            vcn.GetActivity(),
-                                            vcn.GetVersion());
+    DbStatement stmt = DbStatement::Prepare(db, sql, package_name, activity_name);
 
     std::vector<RawTraceModel> results;
 
@@ -1043,9 +979,8 @@ class PrefetchFileModel : public Model {
   }
 
  public:
-  static std::optional<PrefetchFileModel> SelectByVersionedComponentName(
-      DbHandle db,
-      VersionedComponentName vcn) {
+  static std::optional<PrefetchFileModel> SelectByPackageNameActivityName(
+      DbHandle db, const std::string& package_name, const std::string& activity_name) {
     ScopedLockDb lock{db};
 
     const char* sql =
@@ -1053,13 +988,9 @@ class PrefetchFileModel : public Model {
       "FROM prefetch_files "
       "INNER JOIN activities ON activities.id = prefetch_files.activity_id "
       "INNER JOIN packages ON packages.id = activities.package_id "
-      "WHERE packages.name = ? AND activities.name = ? AND packages.version = ?";
+      "WHERE packages.name = ? AND activities.name = ? ";
 
-    DbStatement stmt = DbStatement::Prepare(db,
-                                            sql,
-                                            vcn.GetPackage(),
-                                            vcn.GetActivity(),
-                                            vcn.GetVersion());
+    DbStatement stmt = DbStatement::Prepare(db, sql, package_name, activity_name);
 
     PrefetchFileModel p{db};
 

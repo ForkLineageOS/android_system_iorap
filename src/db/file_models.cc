@@ -87,7 +87,11 @@ std::string FileModelBase::BaseDir() const {
   std::stringstream ss;
 
   ss << root_path_ << "/" << vcn_.GetPackage() << "/";
-  ss << vcn_.GetVersion();
+  if (vcn_.GetVersion()) {
+    ss << *vcn_.GetVersion();
+  } else {
+    ss << "none";
+  }
   ss << "/";
   ss << vcn_.GetActivity() << "/";
   ss << SubDir();
@@ -127,7 +131,9 @@ std::string PerfettoTraceFileModel::BaseFile() const {
 
 void PerfettoTraceFileModel::DeleteOlderFiles(DbHandle& db, VersionedComponentName vcn) {
   std::vector<RawTraceModel> raw_traces =
-      RawTraceModel::SelectByVersionedComponentName(db, vcn);
+      RawTraceModel::SelectByPackageNameActivityName(db,
+                                                     vcn.GetPackage(),
+                                                     vcn.GetActivity());  // TODO: version
 
   if (WOULD_LOG(VERBOSE)) {
     size_t raw_traces_size = raw_traces.size();
