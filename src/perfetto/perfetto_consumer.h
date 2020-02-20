@@ -48,9 +48,9 @@ struct PerfettoConsumer {
 };
 
 // "Live" implementation that calls down to libperfetto.
-struct PerfettoConsumerImpl : public PerfettoConsumer {
+struct PerfettoConsumerRawImpl : public PerfettoConsumer {
   // Marks this constructor as the one to use for injection.
-  INJECT(PerfettoConsumerImpl()) = default;
+  INJECT(PerfettoConsumerRawImpl()) = default;
 
   virtual Handle Create(const void* config_proto,
                         size_t config_len,
@@ -77,7 +77,29 @@ struct PerfettoConsumerImpl : public PerfettoConsumer {
     return ::perfetto::consumer::PollState(handle);
   }
 
-  virtual ~PerfettoConsumerImpl() {}
+  virtual ~PerfettoConsumerRawImpl() {}
+};
+
+// "Safe" implementation that has extra checking around it.
+class PerfettoConsumerImpl : public PerfettoConsumer {
+ public:
+  // Marks this constructor as the one to use for injection.
+  INJECT(PerfettoConsumerImpl()) { Initialize(); }
+
+  virtual Handle Create(const void* config_proto,
+                        size_t config_len,
+                        OnStateChangedCb callback,
+                        void* callback_arg) override;
+  virtual void StartTracing(Handle handle) override;
+  virtual TraceBuffer ReadTrace(Handle handle) override;
+  virtual void Destroy(Handle handle) override;
+  virtual State PollState(Handle handle) override;
+
+  virtual ~PerfettoConsumerImpl();
+ private:
+  void Initialize();
+  struct Impl;
+  PerfettoConsumerImpl::Impl* impl_;
 };
 
 }  // namespace iorap::perfetto
