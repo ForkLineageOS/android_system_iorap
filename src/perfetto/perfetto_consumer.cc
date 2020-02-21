@@ -15,8 +15,11 @@
 #include "perfetto/perfetto_consumer.h"
 
 #include <android-base/logging.h>
+#include <android-base/properties.h>
+#include <utils/Looper.h>
 #include <utils/Printer.h>
 
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -76,11 +79,13 @@ std::string ToString(StateKind kind) {
   return ss.str();
 }
 
+static constexpr uint64_t kSecToNano = 1000000000LL;
+
 static uint64_t GetTimeNanoseconds() {
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
 
-  uint64_t now_ns = (now.tv_sec * 1000000000LL + now.tv_nsec);
+  uint64_t now_ns = (now.tv_sec * kSecToNano + now.tv_nsec);
   return now_ns;
 }
 
@@ -88,6 +93,8 @@ static uint64_t GetTimeNanoseconds() {
 struct HandleDescription {
   Handle handle_;
   StateKind kind_;  // Our state. required for correctness.
+  OnStateChangedCb callback_;  // Required for Destroy callbacks.
+  void* callback_arg_;
 
   // For dumping to logs:
   State state_;  // perfetto state
@@ -99,7 +106,40 @@ struct HandleDescription {
 //
 // Track and verify that our perfetto usage is sane.
 struct PerfettoConsumerImpl::Impl {
-  Impl() : raw_{new PerfettoConsumerRawImpl{}} {
+  Impl() : raw_{new PerfettoConsumerRawImpl{}},
+      message_handler_{new TraceMessageHandler{this}} {
+    std::thread watchdog_thread{ [this]() {
+      ::android::sp<::android::Looper> looper;
+      {
+        std::lock_guard<std::mutex> guard{looper_mutex_};
+        looper = ::android::Looper::prepare(/*opts*/0);
+        looper_ = looper;
+      }
+
+      static constexpr int kTimeoutMillis = std::numeric_limits<int>::max();
+
+      while (true) {
+        // Execute any pending callbacks, otherwise just block forever.
+        int result = looper->pollAll(kTimeoutMillis);
+
+        if (result == ::android::Looper::POLL_ERROR) {
+          LOG(ERROR) << "PerfettoConsumerImpl::Looper got a POLL_ERROR";
+        } else {
+          LOG(DEBUG) << "PerfettoConsumerImpl::Looper result was " << result;
+        }
+      }
+    }};
+
+    // Let thread run freely on its own.
+    watchdog_thread.detach();
+
+    // Block until looper_ is prepared.
+    while (true) {
+      std::lock_guard<std::mutex> guard{looper_mutex_};
+      if (looper_ != nullptr) {
+        break;
+      }
+    }
   }
 
  private:
@@ -110,7 +150,24 @@ struct PerfettoConsumerImpl::Impl {
   Handle last_created_{0};
   Handle last_destroyed_{0};
 
-  std::mutex mutex_;
+  std::mutex mutex_;  // Guard above values.
+
+  ::android::sp<::android::Looper> looper_;
+  std::mutex looper_mutex_;  // Guard looper_.
+
+  struct TraceMessageHandler : public ::android::MessageHandler {
+    TraceMessageHandler(Impl* impl) : impl_{impl} {
+      CHECK(impl != nullptr);
+    }
+
+    Impl* impl_;
+
+    virtual void handleMessage(const ::android::Message& message) override {
+      impl_->OnTraceMessage(static_cast<Handle>(message.what));
+    }
+  };
+
+  ::android::sp<TraceMessageHandler> message_handler_;
 
  public:
   Handle Create(const void* config_proto,
@@ -132,6 +189,8 @@ struct PerfettoConsumerImpl::Impl {
 
     HandleDescription handle_desc;
     handle_desc.handle_ = handle;
+    handle_desc.callback_ = callback;
+    handle_desc.callback_arg_ = callback_arg;
     UpdateHandleDescription(/*inout*/&handle_desc, StateKind::kCreated);
 
     // assume we never wrap around due to using int64
@@ -144,19 +203,29 @@ struct PerfettoConsumerImpl::Impl {
   void StartTracing(Handle handle) {
     LOG(DEBUG) << "PerfettoConsumer::StartTracing(handle=" << handle << ")";
 
-    std::lock_guard<std::mutex> guard{mutex_};
+    {
+      std::lock_guard<std::mutex> guard{mutex_};
 
-    auto it = states_.find(handle);
-    if (it == states_.end()) {
-      LOG(ERROR) << "Cannot StartTracing(" << handle << "), untracked handle";
-      return;
+      auto it = states_.find(handle);
+      if (it == states_.end()) {
+        LOG(ERROR) << "Cannot StartTracing(" << handle << "), untracked handle";
+        return;
+      }
+      HandleDescription& handle_desc = it->second;
+
+      raw_->StartTracing(handle);
+      UpdateHandleDescription(/*inout*/&handle_desc, StateKind::kStartedTracing);
     }
-    HandleDescription& handle_desc = it->second;
 
-    raw_->StartTracing(handle);
-    UpdateHandleDescription(/*inout*/&handle_desc, StateKind::kStartedTracing);
+    // Use a looper here to add a timeout and immediately destroy the trace buffer.
+    CHECK_LE(static_cast<int64_t>(handle), static_cast<int64_t>(std::numeric_limits<int>::max()));
+    int message_code = static_cast<int>(handle);
+    ::android::Message message{message_code};
 
-    // TODO: Use a looper here to add a timeout and immediately destroy the trace buffer.
+    std::lock_guard<std::mutex> looper_guard{looper_mutex_};
+    looper_->sendMessageDelayed(static_cast<nsecs_t>(GetPropertyTraceTimeoutNs()),
+                                message_handler_,
+                                message);
   }
 
   TraceBuffer ReadTrace(Handle handle) {
@@ -179,6 +248,13 @@ struct PerfettoConsumerImpl::Impl {
   }
 
   void Destroy(Handle handle) {
+    HandleDescription handle_desc;
+    TryDestroy(handle, /*do_destroy*/true, /*out*/&handle_desc);;
+  }
+
+  bool TryDestroy(Handle handle, bool do_destroy, /*out*/HandleDescription* handle_desc_out) {
+    CHECK(handle_desc_out != nullptr);
+
     LOG(VERBOSE) << "PerfettoConsumer::Destroy(handle=" << handle << ")";
 
     std::lock_guard<std::mutex> guard{mutex_};
@@ -187,17 +263,23 @@ struct PerfettoConsumerImpl::Impl {
     if (it == states_.end()) {
       // Leniency for calling Destroy multiple times. It's not a mistake.
       LOG(ERROR) << "Cannot Destroy(" << handle << "), untracked handle";
-      return;
+      return false;
     }
 
     HandleDescription& handle_desc = it->second;
 
-    raw_->Destroy(handle);
+    if (do_destroy) {
+      raw_->Destroy(handle);
+    }
     UpdateHandleDescription(/*inout*/&handle_desc, StateKind::kDestroyed);
+
+    *handle_desc_out = handle_desc;
 
     // No longer track this handle to avoid memory leaks.
     last_destroyed_ = handle;
     states_.erase(it);
+
+    return true;
   }
 
   State PollState(Handle handle) {
@@ -220,13 +302,92 @@ struct PerfettoConsumerImpl::Impl {
         if (!IsUncreated(handle)) {
           LOG(WARNING) << "bad state detection";
         }
+        UpdateHandleDescription(/*inout*/&state, StateKind::kUncreated);
       }
       return state;
     }
     return it->second;
   }
 
+  void OnTraceMessage(Handle handle) {
+    LOG(VERBOSE) << "OnTraceMessage(" << static_cast<int64_t>(handle) << ")";
+    HandleDescription handle_desc{};
+    {
+      std::lock_guard<std::mutex> guard{mutex_};
+
+      auto it = states_.find(handle);
+      if (it == states_.end()) {
+        // Handle values are never re-used, so we can simply ignore the message here
+        // instead of having to remove it from the message queue.
+        LOG(VERBOSE) << "OnTraceMessage(" << static_cast<int64_t>(handle)
+                     << ") no longer tracked handle";
+        return;
+      }
+      handle_desc = it->second;
+    }
+
+    // First check. Has this trace been active for too long?
+    uint64_t now_ns = GetTimeNanoseconds();
+    if (handle_desc.kind_ == StateKind::kStartedTracing) {
+      // Ignore other kinds of traces because they don't exhaust perfetto resources.
+      CHECK(handle_desc.started_tracing_ns_.has_value()) << static_cast<int64_t>(handle);
+
+      uint64_t started_tracing_ns = *handle_desc.started_tracing_ns_;
+
+      if ((now_ns - started_tracing_ns) > GetPropertyTraceTimeoutNs()) {
+        LOG(WARNING) << "Perfetto Handle timed out after " << (now_ns - started_tracing_ns) << "ns"
+                     << ", forcibly destroying";
+
+        // Let the callback handler call Destroy.
+        handle_desc.callback_(handle, State::kTraceFailed, handle_desc.callback_arg_);
+      }
+    }
+
+    // Second check. Are there too many traces now? Cull the old traces.
+    std::vector<HandleDescription> handle_list;
+    do {
+      std::lock_guard<std::mutex> guard{mutex_};
+
+      size_t max_trace_count = GetPropertyMaxTraceCount();
+      if (states_.size() > max_trace_count) {
+        size_t overflow_count = states_.size() - max_trace_count;
+        LOG(WARNING) << "Too many perfetto handles, overflowed by " << overflow_count
+                     << ", pruning down to " << max_trace_count;
+      } else {
+        break;
+      }
+
+      size_t prune_count = states_.size() - max_trace_count;
+      auto it = states_.begin();
+      for (size_t i = 0; i < prune_count; ++i) {
+        // Simply prune by handle 1,2,3,4...
+        // We could do better with a timestamp if we wanted to.
+        ++it;
+        handle_list.push_back(it->second);
+      }
+    } while (false);
+
+    for (HandleDescription& handle_desc : handle_list) {
+      LOG(DEBUG) << "Perfetto handle pruned: " << static_cast<int64_t>(handle);
+
+      // Let the callback handler call Destroy.
+      handle_desc.callback_(handle, State::kTraceFailed, handle_desc.callback_arg_);
+    }
+  }
+
  private:
+  static uint64_t GetPropertyTraceTimeoutNs() {
+    static uint64_t value =                       // property is timeout in seconds
+        ::android::base::GetUintProperty<uint64_t>("iorapd.perfetto.timeout", /*default*/10);
+    return value * kSecToNano;
+  }
+
+  static size_t GetPropertyMaxTraceCount() {
+    static size_t value =
+        ::android::base::GetUintProperty<size_t>("iorapd.perfetto.max_traces", /*default*/5);
+    return value;
+  }
+
   void UpdateHandleDescription(/*inout*/HandleDescription* handle_desc, StateKind kind) {
     CHECK(handle_desc != nullptr);
     handle_desc->kind_ = kind;
@@ -315,6 +476,9 @@ struct PerfettoConsumerImpl::Impl {
     bool is_it_locked = mutex_.try_lock();
 
     printer.printFormatLine("Perfetto consumer state:");
+    if (!is_it_locked) {
+      printer.printLine("""""  (possible deadlock)");
+    }
     printer.printFormatLine("  Last destroyed handle: %" PRId64, last_destroyed_);
     printer.printFormatLine("  Last created handle: %" PRId64, last_created_);
     printer.printFormatLine("");
