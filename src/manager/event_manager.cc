@@ -898,6 +898,10 @@ class EventManager::Impl {
     return true;  // No errors.
   }
 
+  void Dump(/*borrow*/::android::Printer& printer) {
+    ::iorap::perfetto::PerfettoConsumerImpl::Dump(/*borrow*/printer);
+  }
+
   rxcpp::composite_subscription InitializeRxGraph() {
     LOG(VERBOSE) << "EventManager::InitializeRxGraph";
 
@@ -1126,6 +1130,10 @@ bool EventManager::OnAppLaunchEvent(RequestId request_id,
 bool EventManager::OnJobScheduledEvent(RequestId request_id,
                                        const JobScheduledEvent& event) {
   return impl_->OnJobScheduledEvent(request_id, event);
+}
+
+void EventManager::Dump(/*borrow*/::android::Printer& printer) {
+  return impl_->Dump(printer);
 }
 
 }  // namespace iorap::manager

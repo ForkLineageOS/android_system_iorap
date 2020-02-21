@@ -18,6 +18,10 @@
 #include <fruit/fruit.h>
 #include <perfetto/public/consumer_api.h>  // libperfetto
 
+namespace android {
+class Printer;
+}  // namespace android
+
 namespace iorap::perfetto {
 
 // Abstract out the Perfetto C API behind a virtual interface:
@@ -96,6 +100,9 @@ class PerfettoConsumerImpl : public PerfettoConsumer {
   virtual State PollState(Handle handle) override;
 
   virtual ~PerfettoConsumerImpl();
+
+  static void Dump(/*borrow*/::android::Printer& printer);
+
  private:
   void Initialize();
   struct Impl;

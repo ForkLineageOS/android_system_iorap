@@ -24,8 +24,12 @@
 
 #include <memory>
 
+namespace android {
+class Printer;
+}  // namespace android
+
 namespace iorap::perfetto {
-  struct RxProducerFactory;
+struct RxProducerFactory;
 }  // namespace iorap::perfetto
 
 namespace iorap::manager {
@@ -74,6 +78,9 @@ class EventManager {
   bool OnJobScheduledEvent(binder::RequestId request_id,
                            const binder::JobScheduledEvent& event);
 
+
+  // Print to adb shell dumpsys (for bugreport info).
+  void Dump(/*borrow*/::android::Printer& printer);
 
   class Impl;
  private:

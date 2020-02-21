@@ -24,6 +24,7 @@
 #include <binder/BinderService.h>
 #include <binder/IPCThreadState.h>
 #include <include/binder/request_id.h>
+#include <utils/Printer.h>
 
 /*
  * Definitions for the IIorap binder native service implementation.
@@ -170,6 +171,10 @@ class IIorapImpl::Impl {
     return service_params_.event_manager_->OnJobScheduledEvent(request_id, event);
   }
 
+  void Dump(/*borrow*/::android::Printer& printer) {
+    return service_params_.event_manager_->Dump(/*borrow*/printer);
+  }
+
   void HandleFakeBehavior(const RequestId& request_id) {
     DCHECK(service_params_.fake_);
 
@@ -261,6 +266,15 @@ bool IIorapImpl::Start(std::shared_ptr<manager::EventManager> event_manager) {
   // to delete the majority of atomics for any pre-thread-start initialization...
 
   return true;
+}
+
+::android::status_t IIorapImpl::dump(int fd, const ::android::Vector<::android::String16>& args) {
+
+  ::android::FdPrinter printer{fd};
+
+  impl_->Dump(printer);
+
+  return ::android::NO_ERROR;
 }
 
 namespace {
