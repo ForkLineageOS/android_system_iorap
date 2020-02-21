@@ -15,11 +15,15 @@
 #include "perfetto/perfetto_consumer.h"
 
 #include <android-base/logging.h>
+#include <utils/Printer.h>
 
 #include <map>
 #include <memory>
+#include <mutex>
+#include <sstream>
 #include <vector>
 
+#include <inttypes.h>
 #include <time.h>
 
 namespace iorap::perfetto {
@@ -66,6 +70,12 @@ std::ostream& operator<<(std::ostream& os, StateKind kind) {
   return os;
 }
 
+std::string ToString(StateKind kind) {
+  std::stringstream ss;
+  ss << kind;
+  return ss.str();
+}
+
 static uint64_t GetTimeNanoseconds() {
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
@@ -100,6 +110,8 @@ struct PerfettoConsumerImpl::Impl {
   Handle last_created_{0};
   Handle last_destroyed_{0};
 
+  std::mutex mutex_;
+
  public:
   Handle Create(const void* config_proto,
                 size_t config_len,
@@ -108,6 +120,8 @@ struct PerfettoConsumerImpl::Impl {
     LOG(VERBOSE) << "PerfettoConsumer::Create("
                  << "config_len=" << config_len << ")";
     Handle handle = raw_->Create(config_proto, config_len, callback, callback_arg);
+
+    std::lock_guard<std::mutex> guard{mutex_};
 
     // Assume every Handle starts at 0 and then increments by 1 every Create.
     ++last_created_;
@@ -129,6 +143,9 @@ struct PerfettoConsumerImpl::Impl {
 
   void StartTracing(Handle handle) {
     LOG(DEBUG) << "PerfettoConsumer::StartTracing(handle=" << handle << ")";
+
+    std::lock_guard<std::mutex> guard{mutex_};
+
     auto it = states_.find(handle);
     if (it == states_.end()) {
       LOG(ERROR) << "Cannot StartTracing(" << handle << "), untracked handle";
@@ -144,6 +161,9 @@ struct PerfettoConsumerImpl::Impl {
 
   TraceBuffer ReadTrace(Handle handle) {
     LOG(DEBUG) << "PerfettoConsumer::ReadTrace(handle=" << handle << ")";
+
+    std::lock_guard<std::mutex> guard{mutex_};
+
     auto it = states_.find(handle);
     if (it == states_.end()) {
       LOG(ERROR) << "Cannot ReadTrace(" << handle << "), untracked handle";
@@ -160,6 +180,9 @@ struct PerfettoConsumerImpl::Impl {
 
   void Destroy(Handle handle) {
     LOG(VERBOSE) << "PerfettoConsumer::Destroy(handle=" << handle << ")";
+
+    std::lock_guard<std::mutex> guard{mutex_};
+
     auto it = states_.find(handle);
     if (it == states_.end()) {
       // Leniency for calling Destroy multiple times. It's not a mistake.
@@ -185,6 +208,8 @@ struct PerfettoConsumerImpl::Impl {
   // Either fetch or infer the current handle state from a handle.
   // Meant for debugging/logging only.
   HandleDescription GetOrInferHandleDescription(Handle handle) {
+    std::lock_guard<std::mutex> guard{mutex_};
+
     auto it = states_.find(handle);
     if (it == states_.end()) {
       HandleDescription state;
@@ -285,6 +310,38 @@ struct PerfettoConsumerImpl::Impl {
   }
 
  public:
+  void Dump(::android::Printer& printer) {
+    // Locking can fail if we dump during a deadlock, so just do a best-effort lock here.
+    bool is_it_locked = mutex_.try_lock();
+
+    printer.printFormatLine("Perfetto consumer state:");
+    printer.printFormatLine("  Last destroyed handle: %" PRId64, last_destroyed_);
+    printer.printFormatLine("  Last created handle: %" PRId64, last_created_);
+    printer.printFormatLine("");
+    printer.printFormatLine("  In-flight handles:");
+
+    for (auto it = states_.begin(); it != states_.end(); ++it) {
+      HandleDescription& handle_desc = it->second;
+      uint64_t started_tracing =
+          handle_desc.started_tracing_ns_ ? *handle_desc.started_tracing_ns_ : 0;
+      printer.printFormatLine("    Handle %" PRId64, handle_desc.handle_);
+      printer.printFormatLine("      Kind: %s", ToString(handle_desc.kind_).c_str());
+      printer.printFormatLine("      Perfetto State: %d", static_cast<int>(handle_desc.state_));
+      printer.printFormatLine("      Started tracing at: %" PRIu64, started_tracing);
+      printer.printFormatLine("      Last transition at: %" PRIu64,
+                              handle_desc.last_transition_ns_);
+    }
+    if (states_.empty()) {
+      printer.printFormatLine("    (None)");
+    }
+
+    printer.printFormatLine("");
+
+    if (is_it_locked) {  // u.b. if calling unlock on an unlocked mutex.
+      mutex_.unlock();
+    }
+  }
+
   static PerfettoConsumerImpl::Impl* GetImplSingleton() {
     static PerfettoConsumerImpl::Impl impl;
     return &impl;
@@ -310,6 +367,10 @@ PerfettoConsumerImpl::~PerfettoConsumerImpl() {
 void PerfettoConsumerImpl::Initialize() {
   // impl_ = new PerfettoConsumerImpl::Impl();  // TODO: no singleton
   impl_ = PerfettoConsumerImpl::Impl::GetImplSingleton();
+}
+
+void PerfettoConsumerImpl::Dump(::android::Printer& printer) {
+  PerfettoConsumerImpl::Impl::GetImplSingleton()->Dump(/*borrow*/printer);
 }
 
 PerfettoConsumer::Handle PerfettoConsumerImpl::Create(const void* config_proto,

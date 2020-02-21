@@ -45,6 +45,9 @@ public:
   static bool Start(std::shared_ptr<iorap::manager::EventManager> event_manager);
   static constexpr const char* getServiceName() { return "iorapd"; };
 
+  virtual ::android::status_t dump(int fd,
+                                   const ::android::Vector<::android::String16>& args) override;
+
 // Join all parameter declarations by splitting each parameter with a comma.
 // Types are used fully.
 #define IIORAP_IMPL_ARGS(...) \
