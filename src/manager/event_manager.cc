@@ -406,7 +406,7 @@ struct AppLaunchEventState {
       return file_path;
     }
 
-    LOG(ERROR) << "Prebuilt compiled trace doesn't exists. file_path: "
+    LOG(DEBUG) << "Prebuilt compiled trace doesn't exists. file_path: "
                << file_path;
 
     return std::nullopt;
