@@ -547,9 +547,9 @@ struct AppLaunchEventState {
     if (rx_lifetime_) {
       // TODO: it would be good to call perfetto Destroy.
 
-      std::remove(rx_in_flight_.begin(),
-                  rx_in_flight_.end(),
-                  *rx_lifetime_);
+      rx_in_flight_.erase(std::remove(rx_in_flight_.begin(),
+                                      rx_in_flight_.end(), *rx_lifetime_),
+                          rx_in_flight_.end());
 
       LOG(VERBOSE) << "AppLaunchEventState - AbortTrace - Unsubscribe";
       rx_lifetime_->unsubscribe();
