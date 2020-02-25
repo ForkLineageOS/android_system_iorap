@@ -68,12 +68,37 @@ struct AppLaunchEvent : public ::android::Parcelable {
                  int64_t sequence_id,
                  std::unique_ptr<IntentProto> intent_proto = nullptr,
                  Temperature temperature = Temperature::kUninitialized,
-                 std::unique_ptr<ActivityRecordProto> activity_record_proto = nullptr)
+                 std::unique_ptr<ActivityRecordProto> activity_record_proto = nullptr,
+                 int64_t timestamp_nanos = -1)
     : type(type),
       sequence_id(sequence_id),
       intent_proto(std::move(intent_proto)),
       temperature(temperature),
-      activity_record_proto(std::move(activity_record_proto)) {
+      activity_record_proto(std::move(activity_record_proto)),
+      timestamp_nanos(timestamp_nanos) {
+  }
+
+  AppLaunchEvent(const AppLaunchEvent& other) {
+    *this = other;
+  }
+
+  AppLaunchEvent& operator=(const AppLaunchEvent& other) {
+    if (&other == this) {
+      return *this;
+    }
+
+    type = other.type;
+    sequence_id = other.sequence_id;
+    if (other.intent_proto != nullptr) {
+      intent_proto.reset(new IntentProto(*other.intent_proto));
+    }
+    temperature = other.temperature;
+    if (other.activity_record_proto != nullptr) {
+      activity_record_proto.reset(new ActivityRecordProto(*other.activity_record_proto));
+    }
+    timestamp_nanos = other.timestamp_nanos;
+
+    return *this;
   }
 
   ::android::status_t readFromParcel(const android::Parcel* parcel) override {
