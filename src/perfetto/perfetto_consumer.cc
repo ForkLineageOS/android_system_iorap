@@ -92,14 +92,16 @@ static uint64_t GetTimeNanoseconds() {
 // Describe the state of our handle in detail for debugging/logging.
 struct HandleDescription {
   Handle handle_;
-  StateKind kind_;  // Our state. required for correctness.
-  OnStateChangedCb callback_;  // Required for Destroy callbacks.
-  void* callback_arg_;
+  StateKind kind_{StateKind::kUncreated};  // Our state. required for correctness.
+  OnStateChangedCb callback_{nullptr};  // Required for Destroy callbacks.
+  void* callback_arg_{nullptr};
 
   // For dumping to logs:
-  State state_;  // perfetto state
+  State state_{State::kSessionNotFound};  // perfetto state
   std::optional<uint64_t> started_tracing_ns_; // when StartedTracing last called.
-  std::uint64_t last_transition_ns_;
+  std::uint64_t last_transition_ns_{0};
+
+  HandleDescription(Handle handle): handle_(handle) {}
 };
 
 // pimpl idiom to hide the implementation details from header
@@ -187,15 +189,15 @@ struct PerfettoConsumerImpl::Impl {
     // If we have to, we can go with Untracked=Uncreated|Destroyed but it's better to distinguish
     // the two if possible.
 
-    HandleDescription handle_desc;
+    HandleDescription handle_desc{handle};
     handle_desc.handle_ = handle;
     handle_desc.callback_ = callback;
     handle_desc.callback_arg_ = callback_arg;
     UpdateHandleDescription(/*inout*/&handle_desc, StateKind::kCreated);
 
     // assume we never wrap around due to using int64
-    CHECK(states_.find(handle) == states_.end()) << "perfetto handle was re-used: " << handle;
-    states_[handle] = handle_desc;
+    bool inserted = states_.insert({handle, handle_desc}).second;
+    CHECK(inserted) << "perfetto handle was re-used: " << handle;
 
     return handle;
   }
@@ -248,7 +250,7 @@ struct PerfettoConsumerImpl::Impl {
   }
 
   void Destroy(Handle handle) {
-    HandleDescription handle_desc;
+    HandleDescription handle_desc{handle};
     TryDestroy(handle, /*do_destroy*/true, /*out*/&handle_desc);;
   }
 
@@ -294,7 +296,7 @@ struct PerfettoConsumerImpl::Impl {
 
     auto it = states_.find(handle);
     if (it == states_.end()) {
-      HandleDescription state;
+      HandleDescription state{handle};
       // If it's untracked it hasn't been created yet, or it was already destroyed.
       if (IsDestroyed(handle)) {
         UpdateHandleDescription(/*inout*/&state, StateKind::kDestroyed);
@@ -311,7 +313,7 @@ struct PerfettoConsumerImpl::Impl {
 
   void OnTraceMessage(Handle handle) {
     LOG(VERBOSE) << "OnTraceMessage(" << static_cast<int64_t>(handle) << ")";
-    HandleDescription handle_desc{};
+    HandleDescription handle_desc{handle};
     {
       std::lock_guard<std::mutex> guard{mutex_};
 
