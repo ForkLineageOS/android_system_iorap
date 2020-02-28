@@ -2,6 +2,9 @@
   "presubmit": [
     {
       "name": "iorapd-tests"
+    },
+    {
+      "name": "iorap-functional-tests"
     }
   ],
   "imports": [

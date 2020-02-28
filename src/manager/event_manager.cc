@@ -406,7 +406,7 @@ struct AppLaunchEventState {
       return file_path;
     }
 
-    LOG(ERROR) << "Prebuilt compiled trace doesn't exists. file_path: "
+    LOG(DEBUG) << "Prebuilt compiled trace doesn't exists. file_path: "
                << file_path;
 
     return std::nullopt;
@@ -547,9 +547,9 @@ struct AppLaunchEventState {
     if (rx_lifetime_) {
       // TODO: it would be good to call perfetto Destroy.
 
-      std::remove(rx_in_flight_.begin(),
-                  rx_in_flight_.end(),
-                  *rx_lifetime_);
+      rx_in_flight_.erase(std::remove(rx_in_flight_.begin(),
+                                      rx_in_flight_.end(), *rx_lifetime_),
+                          rx_in_flight_.end());
 
       LOG(VERBOSE) << "AppLaunchEventState - AbortTrace - Unsubscribe";
       rx_lifetime_->unsubscribe();
@@ -670,6 +670,85 @@ struct AppLaunchEventState {
 
     if (!result) {
       LOG(WARNING) << "Failed to update app_launch_histories row";
+    }
+  }
+};
+
+struct AppLaunchEventDefender {
+  binder::AppLaunchEvent::Type last_event_type_{binder::AppLaunchEvent::Type::kUninitialized};
+
+  enum class Result {
+    kAccept,      // Pass-through the new event.
+    kOverwrite,   // Overwrite the new event with a different event.
+    kReject       // Completely reject the new event, it will not be delivered.
+  };
+
+  Result OnAppLaunchEvent(binder::RequestId request_id,
+                          const binder::AppLaunchEvent& event,
+                          binder::AppLaunchEvent* overwrite) {
+    using Type = binder::AppLaunchEvent::Type;
+    CHECK(overwrite != nullptr);
+
+    // Ensure only legal transitions are allowed.
+    switch (last_event_type_) {
+      case Type::kUninitialized:
+      case Type::kIntentFailed:
+      case Type::kActivityLaunchCancelled:
+      case Type::kReportFullyDrawn: {  // From a terminal state, only go to kIntentStarted
+        if (event.type != Type::kIntentStarted) {
+          LOG(WARNING) << "Rejecting transition from " << last_event_type_ << " to " << event.type;
+          last_event_type_ = Type::kUninitialized;
+          return Result::kReject;
+        } else {
+          LOG(VERBOSE) << "Accept transition from " << last_event_type_ << " to " << event.type;
+          last_event_type_ = event.type;
+          return Result::kAccept;
+        }
+      }
+      case Type::kIntentStarted: {
+        if (event.type == Type::kIntentFailed ||
+            event.type == Type::kActivityLaunched) {
+          LOG(VERBOSE) << "Accept transition from " << last_event_type_ << " to " << event.type;
+          last_event_type_ = event.type;
+          return Result::kAccept;
+        } else {
+          LOG(WARNING) << "Overwriting transition from kIntentStarted to "
+                       << event.type << " into kIntentFailed";
+          last_event_type_ = Type::kIntentFailed;
+
+          *overwrite = event;
+          overwrite->type = Type::kIntentFailed;
+          return Result::kOverwrite;
+        }
+      }
+      case Type::kActivityLaunched: {
+        if (event.type == Type::kActivityLaunchFinished ||
+            event.type == Type::kActivityLaunchCancelled) {
+          LOG(VERBOSE) << "Accept transition from " << last_event_type_ << " to " << event.type;
+          last_event_type_ = event.type;
+          return Result::kAccept;
+        } else {
+          LOG(WARNING) << "Overwriting transition from kActivityLaunched to "
+                       << event.type << " into kActivityLaunchCancelled";
+          last_event_type_ = Type::kActivityLaunchCancelled;
+
+          *overwrite = event;
+          overwrite->type = Type::kActivityLaunchCancelled;
+          return Result::kOverwrite;
+        }
+      }
+      case Type::kActivityLaunchFinished: {
+        if (event.type == Type::kIntentStarted ||
+            event.type == Type::kReportFullyDrawn) {
+          LOG(VERBOSE) << "Accept transition from " << last_event_type_ << " to " << event.type;
+          last_event_type_ = event.type;
+          return Result::kAccept;
+        } else {
+          LOG(WARNING) << "Rejecting transition from " << last_event_type_ << " to " << event.type;
+          last_event_type_ = Type::kUninitialized;
+          return Result::kReject;
+        }
+      }
     }
   }
 };
@@ -883,9 +962,28 @@ class EventManager::Impl {
                  << "request_id=" << request_id.request_id << ","
                  << event;
 
-    app_launch_event_subject_.OnNext(event);
+    // Filter any incoming events through a defender that enforces
+    // that all state transitions are as contractually documented in
+    // ActivityMetricsLaunchObserver's javadoc.
+    AppLaunchEvent overwrite_event{};
+    AppLaunchEventDefender::Result result =
+        app_launch_event_defender_.OnAppLaunchEvent(request_id, event, /*out*/&overwrite_event);
 
-    return true;
+    switch (result) {
+      case AppLaunchEventDefender::Result::kAccept:
+        app_launch_event_subject_.OnNext(event);
+        return true;
+      case AppLaunchEventDefender::Result::kOverwrite:
+        app_launch_event_subject_.OnNext(overwrite_event);
+        return false;
+      case AppLaunchEventDefender::Result::kReject:
+        // Intentionally left-empty: we drop the event completely.
+        return false;
+    }
+
+    // In theory returns BAD_VALUE to the other side of this binder connection.
+    // In practice we use 'oneway' flags so this doesn't matter on a regular build.
+    return false;
   }
 
   bool OnJobScheduledEvent(RequestId request_id,
@@ -1065,6 +1163,7 @@ class EventManager::Impl {
   using AppLaunchEventRefWrapper = AppLaunchEventSubject::RefWrapper;
   rxcpp::observable<AppLaunchEventRefWrapper> app_launch_events_;
   AppLaunchEventSubject app_launch_event_subject_;
+  AppLaunchEventDefender app_launch_event_defender_;
 
   rxcpp::observable<std::pair<RequestId, JobScheduledEvent>> job_scheduled_events_;
   JobScheduledEventSubject job_scheduled_event_subject_;
