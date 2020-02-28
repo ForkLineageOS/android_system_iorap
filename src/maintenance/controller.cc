@@ -32,6 +32,7 @@
 #include <optional>
 #include <vector>
 #include <string>
+#include <sys/wait.h>
 
 namespace iorap::maintenance {
 
@@ -116,6 +117,15 @@ bool StartViaFork(const CompilerForkParameters& params) {
     LOG(FATAL) << "Failed to fork a process for compilation";
   } else if (child > 0) {  // we are the caller of this function
     LOG(DEBUG) << "forked into a process for compilation , pid = " << child;
+
+    int wstatus;
+    waitpid(child, /*out*/&wstatus, /*options*/0);
+    if (!WIFEXITED(wstatus)) {
+      LOG(ERROR) << "Child terminated abnormally, status: " << WEXITSTATUS(wstatus);
+      return false;
+    }
+    LOG(DEBUG) << "Child terminated, status: " << WEXITSTATUS(wstatus);
+
     return true;
   } else {
     // we are the child that was forked.
@@ -255,6 +265,7 @@ bool CompileActivity(const db::DbHandle& db,
                  <<" activity_name: " <<activity_name;
       return false;
     }
+
   }
 
   std::optional<db::PrefetchFileModel> compiled_trace =
