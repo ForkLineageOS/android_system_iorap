@@ -670,6 +670,7 @@ cc_defaults {
     defaults: [
         "libiorap-compiler-default-dependencies",
         "libiorap-db-default-dependencies",
+        "libiorap-prefetcher-default-dependencies",
     ],
 
     include_dirs: [],
@@ -678,6 +679,7 @@ cc_defaults {
         "libiorap-binder",
         "libiorap-compiler",
         "libiorap-db",
+        "libiorap-prefetcher",
     ],
 
     shared_libs: []
