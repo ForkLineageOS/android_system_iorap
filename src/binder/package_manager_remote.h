@@ -31,9 +31,6 @@ class PackageManagerRemote {
  public:
   static std::shared_ptr<PackageManagerRemote> Create();
 
-  PackageManagerRemote(android::sp<IPackageManager> package_service)
-      : package_service_(package_service) {}
-
   // Gets the package version based on the package name.
   std::optional<int64_t> GetPackageVersion(const std::string& package_name);
 
@@ -41,6 +38,13 @@ class PackageManagerRemote {
   VersionMap GetPackageVersionMap();
 
  private:
+  template <typename T>
+  android::binder::Status InvokeRemote(T&& lambda);
+
+  // Reconnects to the package manager service.
+  // Retry until timeout.
+  bool ReconnectWithTimeout(int64_t timeout_ms);
+
   // Gets the package manager service.
   static android::sp<IPackageManager> GetPackageService();
 
