@@ -37,6 +37,8 @@ void Usage(char** argv) {
   std::cerr << "" << std::endl;
   std::cerr << "  Optional flags:" << std::endl;
   std::cerr << "    --help,-h                  Print this Usage." << std::endl;
+  std::cerr << "    --blacklist-filter,-bf     Specify regex acting as a blacklist filter." << std::endl;
+  std::cerr << "                               Filepaths matching this regex are removed from the output file." << std::endl;
   std::cerr << "    --output-text,-ot          Output ascii text instead of protobuf (default off)." << std::endl;
   std::cerr << "    --output-proto $,-op $     TraceFile tracebuffer output file (default stdout)." << std::endl;
   std::cerr << "    --inode-textcache $,-it $  Resolve inode->filename from textcache (disables diskscan)." << std::endl;
@@ -56,6 +58,7 @@ int Main(int argc, char** argv) {
   bool wait_for_keystroke = false;
   bool enable_verbose = false;
 
+  std::optional<std::string> arg_blacklist_filter;
   std::string arg_output_proto;
   bool arg_output_text = false;
   std::optional<std::string> arg_inode_textcache;
@@ -92,7 +95,15 @@ int Main(int argc, char** argv) {
       }
       arg_inode_textcache = arg_next;
       ++arg;
-    } else if (argstr == "--verbose" || argstr == "-v") {
+    } else if (argstr == "--blacklist-filter" || argstr == "-bf") {
+      if (!has_arg_next) {
+        std::cerr << "Missing --blacklist-filter <value>" << std::endl;
+        return 1;
+      }
+      arg_blacklist_filter = arg_next;
+      ++arg;
+    }
+    else if (argstr == "--verbose" || argstr == "-v") {
       enable_verbose = true;
     } else if (argstr == "--wait" || argstr == "-w") {
       wait_for_keystroke = true;
@@ -176,6 +187,7 @@ int Main(int argc, char** argv) {
       !PerformCompilation(std::move(perfetto_traces),
                           std::move(arg_output_proto),
                           !arg_output_text,
+                          arg_blacklist_filter,
                           std::move(ir_dependencies));
 
   // Uncomment this if we want to leave the process around to inspect it from adb shell.
