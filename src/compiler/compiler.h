@@ -17,6 +17,7 @@
 
 #include "inode2filename/inode_resolver.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,9 @@ struct  CompilationInput {
 // For each input file name and timestamp limit, ignore any events from the input that
 // exceed the associated timestamp limit.
 //
+// If blacklist_filter is non-null, ignore any file entries whose file path matches the
+// regular expression in blacklist_filter.
+//
 // The result is stored into the file path specified by `output_file_name`.
 //
 // This is a blocking function which returns only when compilation finishes. The return value
@@ -47,6 +51,7 @@ struct  CompilationInput {
 bool PerformCompilation(std::vector<iorap::compiler::CompilationInput> perfetto_traces,
                         std::string output_file_name,
                         bool output_proto,
+                        std::optional<std::string> blacklist_filter,
                         inode2filename::InodeResolverDependencies dependencies);
 
 // The size and order of timestamp_limit_ns should match that of
