@@ -63,6 +63,7 @@ TEST_F(CompilerTest, SingleTraceDuration) {
   bool result = PerformCompilation(perfetto_traces,
                                    output_file_name,
                                    output_proto,
+                                   /*blacklist_filter*/std::nullopt,
                                    ir_dependencies);
   std::ifstream ifs(output_file_name);
 
@@ -92,6 +93,7 @@ TEST_F(CompilerTest, MultiTraceDuration) {
   bool result = PerformCompilation(perfetto_traces,
                                    output_file_name,
                                    output_proto,
+                                   /*blacklist_filter*/std::nullopt,
                                    ir_dependencies);
   std::ifstream ifs(output_file_name);
   std::string content{std::istreambuf_iterator<char>(ifs),
@@ -120,6 +122,7 @@ TEST_F(CompilerTest, NoTraceDuration) {
   bool result = PerformCompilation(perfetto_traces,
                                    output_file_name,
                                    output_proto,
+                                   /*blacklist_filter*/std::nullopt,
                                    ir_dependencies);
   std::ifstream ifs(output_file_name);
   size_t line_num = std::count((std::istreambuf_iterator<char>(ifs)),
@@ -128,5 +131,32 @@ TEST_F(CompilerTest, NoTraceDuration) {
 
   EXPECT_EQ(result, true);
   EXPECT_EQ(line_num, 1675UL);
+}
+
+TEST_F(CompilerTest, BlacklistFilterArtFiles) {
+  std::vector<std::string> input_file_names{GetTestDataPath("common_perfetto_trace.pb")};
+  TemporaryFile tmp_file;
+  char* output_file_name = tmp_file.path;
+  bool output_proto = false;
+
+  std::string blacklist_filter = "[.](art|oat|odex|vdex|dex)$";
+
+  // iorap.cmd.compiler -op output.pb -it common_textcache -ot
+  //                    --blacklist-filter "[.](art|oat|odex|vdex|dex)$" common_perfetto_trace.pb
+
+  std::vector<CompilationInput> perfetto_traces =
+      MakeCompilationInputs(input_file_names, /* timestamp_limit_ns= */{});
+  bool result = PerformCompilation(perfetto_traces,
+                                   output_file_name,
+                                   output_proto,
+                                     blacklist_filter,
+                                   ir_dependencies);
+  std::ifstream ifs(output_file_name);
+  size_t line_num = std::count((std::istreambuf_iterator<char>(ifs)),
+                               (std::istreambuf_iterator<char>()),
+                               '\n');
+
+  EXPECT_EQ(result, true);
+  EXPECT_EQ(line_num, 1617UL);
 }
 }  // namespace iorap::compiler

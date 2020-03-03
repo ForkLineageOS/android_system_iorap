@@ -34,6 +34,7 @@
 #include <fstream>
 #include <optional>
 #include <utility>
+#include <regex>
 
 #include <sched.h>
 #include <sys/types.h>
@@ -707,6 +708,32 @@ std::ostream& operator<<(std::ostream& os, const CompilerPageCacheEvent& e) {
   return os;
 }
 
+// Filter an observable chain of 'ResolvedPageCacheFtraceEvent'
+// into an observable chain of 'ResolvedPageCacheFtraceEvent'.
+//
+// Any items emitted by the input chain that match the regular expression
+// specified by blacklist_filter are not emitted into the output chain.
+auto/*observable<ResolvedPageCacheFtraceEvent>*/ ApplyBlacklistToPageCacheEvents(
+    rxcpp::observable<ResolvedPageCacheFtraceEvent> resolved_events,
+    std::optional<std::string> blacklist_filter) {
+  bool has_re = blacklist_filter.has_value();
+  // default regex engine is ecmascript.
+  std::regex reg_exp{blacklist_filter ? *blacklist_filter : std::string("")};
+
+  return resolved_events.filter(
+    [reg_exp, has_re](const ResolvedPageCacheFtraceEvent& event) {
+      if (!has_re) {
+        return true;
+      }
+      // Remove any entries that match the regex in --blacklist-filter/-bf.
+      bool res = std::regex_search(event.filename, reg_exp);
+      if (res) {
+        LOG(VERBOSE) << "Blacklist filter removed '" << event.filename << "' from chain.";
+      }
+      return !res;
+    });
+}
+
 // Compile an observable chain of 'ResolvedPageCacheFtraceEvent' into
 // an observable chain of distinct, timestamp-ordered, CompilerPageCacheEvent.
 //
@@ -813,11 +840,14 @@ std::vector<CompilationInput> MakeCompilationInputs(
 bool PerformCompilation(std::vector<CompilationInput> perfetto_traces,
                         std::string output_file_name,
                         bool output_proto,
+                        std::optional<std::string> blacklist_filter,
                         inode2filename::InodeResolverDependencies dependencies) {
   auto trace_protos = ReadPerfettoTraceProtos(std::move(perfetto_traces));
   auto resolved_events = ResolvePageCacheEntriesFromProtos(std::move(trace_protos),
                                                            std::move(dependencies));
-  auto compiled_events = CompilePageCacheEvents(std::move(resolved_events));
+  auto filtered_events =
+      ApplyBlacklistToPageCacheEvents(std::move(resolved_events), blacklist_filter);
+  auto compiled_events = CompilePageCacheEvents(std::move(filtered_events));
 
   std::ofstream ofs;
   if (!output_file_name.empty()) {
