@@ -899,11 +899,11 @@ class EventManager::Impl {
     tracing_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
         ph_namespace,
         "iorap_perfetto_enable",
-        ::android::base::GetProperty("iorapd.perfetto.enable", /*default*/"true")) == "true";
+        ::android::base::GetProperty("iorapd.perfetto.enable", /*default*/"false")) == "true";
     readahead_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
         ph_namespace,
         "iorap_readahead_enable",
-        ::android::base::GetProperty("iorapd.readahead.enable", /*default*/"true")) == "true";
+        ::android::base::GetProperty("iorapd.readahead.enable", /*default*/"false")) == "true";
 
     package_blacklister_ = PackageBlacklister{
         /* Colon-separated string list of blacklisted packages, e.g.
