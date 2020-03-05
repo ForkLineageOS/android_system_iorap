@@ -997,7 +997,9 @@ class EventManager::Impl {
   }
 
   void Dump(/*borrow*/::android::Printer& printer) {
+    ::iorap::prefetcher::ReadAhead::Dump(printer);
     ::iorap::perfetto::PerfettoConsumerImpl::Dump(/*borrow*/printer);
+    ::iorap::maintenance::Dump(db::SchemaModel::GetSingleton(), printer);
   }
 
   rxcpp::composite_subscription InitializeRxGraph() {

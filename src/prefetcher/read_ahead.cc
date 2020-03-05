@@ -25,6 +25,7 @@
 #include <android-base/scopeguard.h>
 #include <android-base/properties.h>
 #include <android-base/unique_fd.h>
+#include <deque>
 #include <fcntl.h>
 #include <functional>
 #include <stdint.h>
@@ -33,6 +34,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unordered_map>
+#include <utils/Printer.h>
 
 namespace iorap {
 namespace prefetcher {
@@ -102,6 +104,53 @@ struct TaskData {
   std::shared_ptr<Session> session;
 };
 
+// Remember the last 5 files being prefetched.
+static constexpr size_t kRecentDataCount = 5;
+
+struct RecentData {
+  TaskId task_id;
+  size_t file_lengths_sum;
+};
+
+struct RecentDataKeeper {
+  std::deque<RecentData> recents_;
+  std::mutex mutex_;
+
+  void RecordRecent(TaskId task_id, size_t file_lengths_sum) {
+    std::lock_guard<std::mutex> guard{mutex_};
+
+    while (recents_.size() > kRecentDataCount) {
+      recents_.pop_front();
+    }
+    recents_.push_back(RecentData{std::move(task_id), file_lengths_sum});
+  }
+
+  void Dump(/*borrow*/::android::Printer& printer) {
+    bool locked = mutex_.try_lock();
+
+    printer.printFormatLine("Recent prefetches:");
+    if (!locked) {
+      printer.printLine("""""  (possible deadlock)");
+    }
+
+    for (const RecentData& data : recents_) {
+      printer.printFormatLine("  %s", data.task_id.path.c_str());
+      printer.printFormatLine("    Task ID: %zu", data.task_id.id);
+      printer.printFormatLine("    Bytes count: %zu", data.file_lengths_sum);
+    }
+
+    if (recents_.empty()) {
+      printer.printFormatLine("  (None)");
+    }
+
+    printer.printLine("");
+
+    if (locked) {
+      mutex_.unlock();
+    }
+  }
+};
+
 struct ReadAhead::Impl {
   Impl(bool use_sockets) {
     // Flip this property to test in-process vs out-of-process for the prefetcher code.
@@ -122,11 +171,14 @@ struct ReadAhead::Impl {
   std::unique_ptr<SessionManager> session_manager_;
   SessionKind session_kind_;
   std::unordered_map<size_t /*task index*/, TaskData> read_ahead_file_map_;
+  static RecentDataKeeper recent_data_keeper_;
 
   bool UseSockets() const {
     return session_kind_ == SessionKind::kOutOfProcessSocket;
   }
 };
+
+RecentDataKeeper ReadAhead::Impl::recent_data_keeper_{};
 
 ReadAhead::ReadAhead() : ReadAhead(/*use_sockets*/false) {
 }
@@ -279,6 +331,7 @@ void ReadAhead::BeginTask(const TaskId& id) {
 
   // Go through every trace entry and readahead every (file,offset,len) tuple.
 
+  size_t length_sum = 0;
   size_t entry_offset = 0;
   const serialize::proto::TraceFileList& file_list = trace_file_ptr->list();
   for (const serialize::proto::TraceFileEntry& file_entry : file_list.entries()) {
@@ -295,12 +348,45 @@ void ReadAhead::BeginTask(const TaskId& id) {
       // TODO: Do we need below at all? The always-on Dump already prints a % of failed entries.
       // LOG(WARNING) << "Failed readahead, bad file length/offset in entry @ " << (entry_offset - 1);
     }
+
+    length_sum += static_cast<size_t>(file_entry.file_length());
   }
 
   // TODO: maybe getprop and a single line by default?
   session->Dump(LOG_STREAM(INFO), /*multiline*/true);
 
   impl_->read_ahead_file_map_[id.id] = std::move(task_data);
+
+  ReadAhead::Impl::recent_data_keeper_.RecordRecent(id, length_sum);
+}
+
+void ReadAhead::Dump(::android::Printer& printer) {
+  ReadAhead::Impl::recent_data_keeper_.Dump(printer);
+}
+
+std::optional<size_t> ReadAhead::PrefetchSizeInBytes(const std::string& file_path) {
+  serialize::ArenaPtr<serialize::proto::TraceFile> trace_file_ptr =
+      serialize::ProtobufIO::Open(file_path);
+
+  if (trace_file_ptr == nullptr) {
+    LOG(WARNING) << "PrefetchSizeInBytes: bad file at " << file_path;
+    return std::nullopt;
+  }
+
+  size_t length_sum = 0;
+  const serialize::proto::TraceFileList& file_list = trace_file_ptr->list();
+  for (const serialize::proto::TraceFileEntry& file_entry : file_list.entries()) {
+
+    if (file_entry.file_length() < 0 || file_entry.file_offset() < 0) {
+      LOG(WARNING) << "ReadAhead entry negative file length or offset, illegal: "
+                   << "index_id=" << file_entry.index_id() << ", skipping";
+      continue;
+    }
+
+    length_sum += static_cast<size_t>(file_entry.file_length());
+  }
+
+  return length_sum;
 }
 
 }  // namespace prefetcher
