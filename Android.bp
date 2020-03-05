@@ -108,6 +108,7 @@ cc_library_static {
     srcs: [
         ":iorap-aidl",
         "src/binder/iiorap_impl.cc",
+        "src/binder/package_change_observer.cc",
         "src/binder/package_manager_remote.cc",
         "src/binder/package_version_map.cc",
     ],

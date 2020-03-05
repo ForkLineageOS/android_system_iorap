@@ -22,6 +22,8 @@
 #include "binder/request_id.h"
 #include "binder/task_result.h"
 
+#include <android/content/pm/PackageChangeEvent.h>
+
 #include <memory>
 
 namespace android {
@@ -78,6 +80,11 @@ class EventManager {
   bool OnJobScheduledEvent(binder::RequestId request_id,
                            const binder::JobScheduledEvent& event);
 
+  // Handles a PackageChangeEvent:
+  //
+  // * The package manager service send this event for package install
+  //   update or delete.
+  bool OnPackageChanged(const android::content::pm::PackageChangeEvent& event);
 
   // Print to adb shell dumpsys (for bugreport info).
   void Dump(/*borrow*/::android::Printer& printer);

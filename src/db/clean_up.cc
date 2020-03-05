@@ -70,6 +70,20 @@ void CleanUpFilesForPackage(const db::DbHandle& db,
   }
 }
 
+void CleanUpFilesForPackage(const db::DbHandle& db,
+                            const std::string& package_name,
+                            int64_t version) {
+  std::optional<PackageModel> package =
+        PackageModel::SelectByNameAndVersion(db, package_name.c_str(), version);
+
+  if (!package) {
+    LOG(DEBUG) << "No package to clean up " << package_name << " with version " << version;
+    return;
+  }
+
+  CleanUpFilesForPackage(db, package->id, package_name, version);
+}
+
 void CleanUpFilesForDb(const db::DbHandle& db) {
   std::vector<db::PackageModel> packages = db::PackageModel::SelectAll(db);
   for (db::PackageModel package : packages) {

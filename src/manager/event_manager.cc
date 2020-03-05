@@ -897,6 +897,15 @@ struct JobScheduledEventSubject {
   std::optional<rxcpp::subscriber<std::pair<RequestId, JobScheduledEvent>>> subscriber_;
 };
 
+std::ostream& operator<<(std::ostream& os, const android::content::pm::PackageChangeEvent& event) {
+  os << "PackageChangeEvent{";
+  os << "packageName=" << event.packageName << ",";
+  os << "version=" << event.version << ",";
+  os << "lastUpdateTimeMillis=" << event.lastUpdateTimeMillis;
+  os << "}";
+  return os;
+}
+
 class EventManager::Impl {
  public:
   Impl(/*borrow*/perfetto::RxProducerFactory& perfetto_factory)
@@ -996,6 +1005,25 @@ class EventManager::Impl {
     return true;  // No errors.
   }
 
+  bool OnPackageChanged(const android::content::pm::PackageChangeEvent& event) {
+    LOG(DEBUG) << "Received " << event;
+    if (event.isDeleted) {
+      // Do nothing if the package is deleted rignt now.
+      // The package will be removed from db during maintenance.
+      return true;
+    }
+    // Update the version map.
+    if (version_map_->Update(event.packageName, event.version)) {
+      return true;
+    }
+
+    // Sometimes a package is updated without any version change.
+    // Clean it up in this case.
+    db::DbHandle db{db::SchemaModel::GetSingleton()};
+    db::CleanUpFilesForPackage(db, event.packageName, event.version);
+    return true;
+  }
+
   void Dump(/*borrow*/::android::Printer& printer) {
     ::iorap::prefetcher::ReadAhead::Dump(printer);
     ::iorap::perfetto::PerfettoConsumerImpl::Dump(/*borrow*/printer);
@@ -1056,7 +1084,7 @@ class EventManager::Impl {
       ScopedFormatTrace atrace_update_versions(ATRACE_TAG_PACKAGE_MANAGER,
                                                "Update package versions map cache");
       // Update the version map.
-      version_map_->Update();
+      version_map_->UpdateAll();
     }
 
     db::DbHandle db{db::SchemaModel::GetSingleton()};
@@ -1248,6 +1276,10 @@ bool EventManager::OnAppLaunchEvent(RequestId request_id,
 bool EventManager::OnJobScheduledEvent(RequestId request_id,
                                        const JobScheduledEvent& event) {
   return impl_->OnJobScheduledEvent(request_id, event);
+}
+
+bool EventManager::OnPackageChanged(const android::content::pm::PackageChangeEvent& event) {
+  return impl_->OnPackageChanged(event);
 }
 
 void EventManager::Dump(/*borrow*/::android::Printer& printer) {
