@@ -21,6 +21,10 @@
 #include <string>
 #include <vector>
 
+namespace android {
+class Printer;
+}  // namespace android
+
 namespace iorap::maintenance {
 
 // Enabling mock for testing purpose.
@@ -97,6 +101,9 @@ bool Compile(const std::string& db_path,
              const ControllerParameters& params);
 // Visible for testing.
 bool CompileAppsOnDevice(const db::DbHandle& db, const ControllerParameters& params);
-} // iorap::compiler_controller
+
+void Dump(const db::DbHandle& db, ::android::Printer& printer);
+
+} // iorap::maintenance
 
 #endif  // IORAP_SRC_MAINTENANCE_COMPILER_CONTROLLER_H_
