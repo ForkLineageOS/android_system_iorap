@@ -14,6 +14,7 @@
 
 #include "protobuf_io.h"
 
+#include "common/trace.h"
 #include "serialize/arena_ptr.h"
 
 #include <android-base/chrono_utils.h>
@@ -24,6 +25,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <utils/Trace.h>
 
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include "system/iorap/src/serialize/TraceFile.pb.h"
@@ -44,6 +46,10 @@ ArenaPtr<proto::TraceFile> ProtobufIO::Open(std::string file_path) {
 }
 
 ArenaPtr<proto::TraceFile> ProtobufIO::Open(int fd, const char* file_path) {
+
+  ScopedFormatTrace atrace_protobuf_io_open(ATRACE_TAG_ACTIVITY_MANAGER,
+                                            "ProtobufIO::Open %s",
+                                            file_path);
   android::base::Timer timer{};
 
   struct stat buf;
