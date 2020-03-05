@@ -14,6 +14,7 @@
 
 #include "read_ahead.h"
 
+#include "common/trace.h"
 #include "prefetcher/session_manager.h"
 #include "prefetcher/session.h"
 #include "prefetcher/task_id.h"
@@ -25,6 +26,7 @@
 #include <android-base/scopeguard.h>
 #include <android-base/properties.h>
 #include <android-base/unique_fd.h>
+#include <cutils/trace.h>
 #include <deque>
 #include <fcntl.h>
 #include <functional>
@@ -102,6 +104,7 @@ struct TaskData {
   }
 
   std::shared_ptr<Session> session;
+  int32_t trace_cookie;  // async trace cookie in BeginTask/FinishTask.
 };
 
 // Remember the last 5 files being prefetched.
@@ -172,6 +175,7 @@ struct ReadAhead::Impl {
   SessionKind session_kind_;
   std::unordered_map<size_t /*task index*/, TaskData> read_ahead_file_map_;
   static RecentDataKeeper recent_data_keeper_;
+  int32_t trace_cookie_{0};
 
   bool UseSockets() const {
     return session_kind_ == SessionKind::kOutOfProcessSocket;
@@ -200,6 +204,9 @@ void ReadAhead::FinishTask(const TaskId& id) {
   }
 
   TaskData& task_data = it->second;
+  atrace_async_end(ATRACE_TAG_ACTIVITY_MANAGER,
+                   "ReadAhead Task Scope (for File Descriptors)",
+                   task_data.trace_cookie);
 
   auto deleter = [&]() {
     impl_->read_ahead_file_map_.erase(it);
@@ -214,7 +221,7 @@ void ReadAhead::FinishTask(const TaskId& id) {
   }
 }
 
-void ReadAhead::BeginTaskForSockets(const TaskId& id) {
+void ReadAhead::BeginTaskForSockets(const TaskId& id, int32_t trace_cookie) {
   LOG(VERBOSE) << "BeginTaskForSockets: " << id;
 
   // TODO: atrace.
@@ -233,6 +240,7 @@ void ReadAhead::BeginTaskForSockets(const TaskId& id) {
 
   TaskData task_data;
   task_data.task_id = id;
+  task_data.trace_cookie = trace_cookie;
 
   std::shared_ptr<Session> session =
       impl_->session_manager_->CreateSession(task_data.SessionId(),
@@ -240,6 +248,8 @@ void ReadAhead::BeginTaskForSockets(const TaskId& id) {
                                              trace_file_fd.get());
   task_data.session = session;
   CHECK(session != nullptr);
+
+  task_data.trace_cookie = ++trace_cookie;
 
   // TODO: maybe getprop and a single line by default?
   session->Dump(LOG_STREAM(INFO), /*multiline*/true);
@@ -257,8 +267,13 @@ void ReadAhead::BeginTask(const TaskId& id) {
     LOG(DEBUG) << "BeginTask: beginning usec: " << now_usec;
   }
 
+  int32_t trace_cookie = ++impl_->trace_cookie_;
+  atrace_async_begin(ATRACE_TAG_ACTIVITY_MANAGER,
+                     "ReadAhead Task Scope (for File Descriptors)",
+                     trace_cookie);
+
   if (impl_->UseSockets()) {
-    BeginTaskForSockets(id);
+    BeginTaskForSockets(id, trace_cookie);
     return;
   }
 
@@ -270,6 +285,11 @@ void ReadAhead::BeginTask(const TaskId& id) {
   // TODO: refactor this code with SessionDirect::ProcessFd ?
   TaskData task_data;
   task_data.task_id = id;
+  task_data.trace_cookie = trace_cookie;
+
+  ScopedFormatTrace atrace_begin_task(ATRACE_TAG_ACTIVITY_MANAGER,
+                                      "ReadAhead::BeginTask %s",
+                                      id.path.c_str());
 
   // Include CreateSession above the Protobuf deserialization so that we can include
   // the 'total_duration' as part of the Session dump (relevant when we use IPC mode only).
@@ -307,21 +327,27 @@ void ReadAhead::BeginTask(const TaskId& id) {
   const serialize::proto::TraceFileIndex& index = trace_file_ptr->index();
 
   size_t count_entries = 0;
-  for (const serialize::proto::TraceFileIndexEntry& index_entry : index.entries()) {
-    LOG(VERBOSE) << "ReadAhead: found file entry: " << index_entry.file_name();
+  {
+    ScopedFormatTrace atrace_register_file_paths(ATRACE_TAG_ACTIVITY_MANAGER,
+                                                 "ReadAhead::RegisterFilePaths %s",
+                                                 id.path.c_str());
+    for (const serialize::proto::TraceFileIndexEntry& index_entry : index.entries()) {
+      LOG(VERBOSE) << "ReadAhead: found file entry: " << index_entry.file_name();
 
-    if (index_entry.id() < 0) {
-      LOG(WARNING) << "ReadAhead: Skip bad TraceFileIndexEntry, negative ID not allowed: "
-                   << index_entry.id();
-      continue;
-    }
+      if (index_entry.id() < 0) {
+        LOG(WARNING) << "ReadAhead: Skip bad TraceFileIndexEntry, negative ID not allowed: "
+                     << index_entry.id();
+        continue;
+      }
 
-    size_t path_id = index_entry.id();
-    const auto& path_file_name = index_entry.file_name();
+      size_t path_id = index_entry.id();
+      const auto& path_file_name = index_entry.file_name();
 
-    if (!session->RegisterFilePath(path_id, path_file_name)) {
-      LOG(WARNING) << "ReadAhead: Failed to register file path: " << path_file_name;
-      ++count_entries;
+      if (!session->RegisterFilePath(path_id, path_file_name)) {
+        LOG(WARNING) << "ReadAhead: Failed to register file path: " << path_file_name;
+      } else {
+        ++count_entries;
+      }
     }
   }
   LOG(VERBOSE) << "ReadAhead: Registered " << count_entries << " file paths";
@@ -329,31 +355,46 @@ void ReadAhead::BeginTask(const TaskId& id) {
 
   LOG(DEBUG) << "ReadAhead: Opened file&headers in " << open_duration_ms.count() << "ms";
 
-  // Go through every trace entry and readahead every (file,offset,len) tuple.
-
   size_t length_sum = 0;
   size_t entry_offset = 0;
-  const serialize::proto::TraceFileList& file_list = trace_file_ptr->list();
-  for (const serialize::proto::TraceFileEntry& file_entry : file_list.entries()) {
-    ++entry_offset;
+  {
+    ScopedFormatTrace atrace_perform_read_ahead(ATRACE_TAG_ACTIVITY_MANAGER,
+                                                "ReadAhead::PerformReadAhead entries=%zu, path=%s",
+                                                count_entries,
+                                                id.path.c_str());
 
-    if (file_entry.file_length() < 0 || file_entry.file_offset() < 0) {
-      LOG(WARNING) << "ReadAhead entry negative file length or offset, illegal: "
-                   << "index_id=" << file_entry.index_id() << ", skipping";
-      continue;
+    // Go through every trace entry and readahead every (file,offset,len) tuple.
+    const serialize::proto::TraceFileList& file_list = trace_file_ptr->list();
+    for (const serialize::proto::TraceFileEntry& file_entry : file_list.entries()) {
+      ++entry_offset;
+
+      if (file_entry.file_length() < 0 || file_entry.file_offset() < 0) {
+        LOG(WARNING) << "ReadAhead entry negative file length or offset, illegal: "
+                     << "index_id=" << file_entry.index_id() << ", skipping";
+        continue;
+      }
+
+      // Attempt to perform readahead. This can generate more warnings dynamically.
+      if (!PerformReadAhead(session, file_entry.index_id(), kind, file_entry.file_length(), file_entry.file_offset())) {
+        // TODO: Do we need below at all? The always-on Dump already prints a % of failed entries.
+        // LOG(WARNING) << "Failed readahead, bad file length/offset in entry @ " << (entry_offset - 1);
+      }
+
+      length_sum += static_cast<size_t>(file_entry.file_length());
     }
-
-    // Attempt to perform readahead. This can generate more warnings dynamically.
-    if (!PerformReadAhead(session, file_entry.index_id(), kind, file_entry.file_length(), file_entry.file_offset())) {
-      // TODO: Do we need below at all? The always-on Dump already prints a % of failed entries.
-      // LOG(WARNING) << "Failed readahead, bad file length/offset in entry @ " << (entry_offset - 1);
-    }
-
-    length_sum += static_cast<size_t>(file_entry.file_length());
   }
 
-  // TODO: maybe getprop and a single line by default?
-  session->Dump(LOG_STREAM(INFO), /*multiline*/true);
+  {
+    ScopedFormatTrace atrace_session_dump(ATRACE_TAG_ACTIVITY_MANAGER,
+                                          "ReadAhead Session Dump entries=%zu",
+                                          entry_offset);
+    // TODO: maybe getprop and a single line by default?
+    session->Dump(LOG_STREAM(INFO), /*multiline*/true);
+  }
+
+  atrace_int(ATRACE_TAG_ACTIVITY_MANAGER,
+             "ReadAhead Bytes Length",
+             static_cast<int32_t>(length_sum));
 
   impl_->read_ahead_file_map_[id.id] = std::move(task_data);
 

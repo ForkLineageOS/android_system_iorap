@@ -43,7 +43,7 @@ int main(int /*argc*/, char** argv) {
 
   LOG(INFO) << kServiceName << " (the prefetchening) firing up";
   {
-    android::ScopedTrace trace_db_init{ATRACE_TAG_PACKAGE_MANAGER, "IorapNativeService::db_init"};
+    android::ScopedTrace trace_db_init{ATRACE_TAG_ACTIVITY_MANAGER, "IorapNativeService::db_init"};
     iorap::db::SchemaModel db_schema =
         iorap::db::SchemaModel::GetOrCreate(
             android::base::GetProperty("iorapd.db.location",
@@ -53,7 +53,7 @@ int main(int /*argc*/, char** argv) {
 
   std::shared_ptr<iorap::manager::EventManager> event_manager;
   {
-    android::ScopedTrace trace_start{ATRACE_TAG_PACKAGE_MANAGER, "IorapNativeService::start"};
+    android::ScopedTrace trace_start{ATRACE_TAG_ACTIVITY_MANAGER, "IorapNativeService::start"};
 
     // TODO: use fruit for this DI.
     event_manager =
