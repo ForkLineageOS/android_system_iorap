@@ -52,7 +52,7 @@ class ReadAhead {
   ReadAhead();
   ~ReadAhead();
  private:
-  void BeginTaskForSockets(const TaskId& id);
+  void BeginTaskForSockets(const TaskId& id, int32_t trace_cookie);
   std::unique_ptr<Impl> impl_;
 };
 

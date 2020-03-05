@@ -18,6 +18,7 @@
 #include "common/cmd_utils.h"
 #include "common/debug.h"
 #include "common/expected.h"
+#include "common/trace.h"
 
 #include "db/models.h"
 #include "inode2filename/inode.h"
@@ -221,6 +222,10 @@ bool CompileActivity(const db::DbHandle& db,
                      const std::string& activity_name,
                      int version,
                      const ControllerParameters& params) {
+  ScopedFormatTrace atrace_compile_package(ATRACE_TAG_PACKAGE_MANAGER,
+                                           "Compile activity %s",
+                                           activity_name.c_str());
+
   db::CompiledTraceFileModel output_file =
       CalculateNewestFilePath(package_name, activity_name, version);
 
@@ -279,6 +284,9 @@ bool CompileActivity(const db::DbHandle& db,
       return false;
     }
 
+    ScopedFormatTrace atrace_compile_fork(ATRACE_TAG_PACKAGE_MANAGER,
+                                          "Fork+exec iorap.cmd.compiler",
+                                          activity_name.c_str());
     if (!StartViaFork(compiler_params)) {
       LOG(ERROR) << "Compilation failed for package_id:" << package_id
                  <<" activity_name: " <<activity_name;
@@ -302,6 +310,10 @@ bool CompilePackage(const db::DbHandle& db,
                     const std::string& package_name,
                     int version,
                     const ControllerParameters& params) {
+  ScopedFormatTrace atrace_compile_package(ATRACE_TAG_PACKAGE_MANAGER,
+                                           "Compile package %s",
+                                           package_name.c_str());
+
   std::optional<db::PackageModel> package =
         db::PackageModel::SelectByNameAndVersion(db, package_name.c_str(), version);
 

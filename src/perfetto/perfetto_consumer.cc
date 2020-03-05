@@ -14,6 +14,8 @@
 
 #include "perfetto/perfetto_consumer.h"
 
+#include "common/trace.h"
+
 #include <android-base/logging.h>
 #include <android-base/properties.h>
 #include <utils/Looper.h>
@@ -99,7 +101,10 @@ struct HandleDescription {
   // For dumping to logs:
   State state_{State::kSessionNotFound};  // perfetto state
   std::optional<uint64_t> started_tracing_ns_; // when StartedTracing last called.
+  std::optional<uint64_t> read_trace_ns_;  // When ReadTrace last called.
   std::uint64_t last_transition_ns_{0};
+  std::optional<uint64_t> trace_cookie_;  // atrace beginning at StartTracing.
+  bool trace_ended_{false};               // atrace ending at ReadTrace or Destroy.
 
   HandleDescription(Handle handle): handle_(handle) {}
 };
@@ -151,6 +156,7 @@ struct PerfettoConsumerImpl::Impl {
   // We need this to be a counter to avoid memory leaks.
   Handle last_created_{0};
   Handle last_destroyed_{0};
+  uint64_t trace_cookie_{0};
 
   std::mutex mutex_;  // Guard above values.
 
@@ -205,6 +211,7 @@ struct PerfettoConsumerImpl::Impl {
   void StartTracing(Handle handle) {
     LOG(DEBUG) << "PerfettoConsumer::StartTracing(handle=" << handle << ")";
 
+    uint64_t trace_cookie;
     {
       std::lock_guard<std::mutex> guard{mutex_};
 
@@ -397,7 +404,42 @@ struct PerfettoConsumerImpl::Impl {
 
     handle_desc->last_transition_ns_ = GetTimeNanoseconds();
     if (kind == StateKind::kStartedTracing) {
-      handle_desc->started_tracing_ns_ = handle_desc->last_transition_ns_;
+      if (!handle_desc->started_tracing_ns_) {
+        handle_desc->started_tracing_ns_ = handle_desc->last_transition_ns_;
+
+        handle_desc->trace_cookie_ = ++trace_cookie_;
+
+        atrace_async_begin(ATRACE_TAG_ACTIVITY_MANAGER,
+                           "Perfetto Scoped Trace",
+                           *handle_desc->trace_cookie_);
+        atrace_int(ATRACE_TAG_ACTIVITY_MANAGER,
+                   "Perfetto::Trace Handle",
+                   static_cast<int32_t>(handle_desc->handle_));
+      }
+    }
+
+    if (kind == StateKind::kReadTracing) {
+      if (!handle_desc->read_trace_ns_) {
+        handle_desc->read_trace_ns_ = handle_desc->last_transition_ns_;
+
+        CHECK(handle_desc->trace_cookie_.has_value())
+            << "Missing cookie for Handle: " << handle_desc->handle_;
+        atrace_async_end(ATRACE_TAG_ACTIVITY_MANAGER,
+                         "Perfetto Scoped Trace",
+                         handle_desc->trace_cookie_.value());
+
+        handle_desc->trace_ended_ = true;
+      }
+    }
+
+    // If Destroy is called prior to ReadTrace, mark the atrace as finished.
+    if (kind == StateKind::kDestroyed && trace_cookie_ && !handle_desc->trace_ended_) {
+      CHECK(handle_desc->trace_cookie_.has_value())
+          << "Missing cookie for Handle: " << handle_desc->handle_;
+      atrace_async_end(ATRACE_TAG_ACTIVITY_MANAGER,
+                       "Perfetto Scoped Trace",
+                       *handle_desc->trace_cookie_);
+      handle_desc->trace_ended_ = true;
     }
   }
 
