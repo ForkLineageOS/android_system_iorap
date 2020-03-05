@@ -1070,6 +1070,23 @@ class PrefetchFileModel : public Model {
     return p;
   }
 
+  static std::vector<PrefetchFileModel> SelectAll(DbHandle db) {
+    ScopedLockDb lock{db};
+
+    std::string query =
+      "SELECT prefetch_files.id, prefetch_files.activity_id, prefetch_files.file_path "
+      "FROM prefetch_files";
+    DbStatement stmt = DbStatement::Prepare(db, query);
+
+    std::vector<PrefetchFileModel> prefetch_files;
+    PrefetchFileModel p{db};
+    while (DbQueryBuilder::SelectOnce(stmt, p.id, p.activity_id, p.file_path)) {
+      prefetch_files.push_back(p);
+    }
+
+    return prefetch_files;
+  }
+
   static std::optional<PrefetchFileModel> Insert(DbHandle db,
                                                  int activity_id,
                                                  std::string file_path) {

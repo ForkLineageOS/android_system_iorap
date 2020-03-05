@@ -22,19 +22,33 @@
 #include "db/models.h"
 #include "inode2filename/inode.h"
 #include "inode2filename/search_directories.h"
+#include "prefetcher/read_ahead.h"
 
 #include <android-base/file.h>
+#include <utils/Printer.h>
 
+#include <ctime>
 #include <iostream>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <vector>
 #include <string>
 #include <sys/wait.h>
 
 namespace iorap::maintenance {
+
+static constexpr size_t kMinTracesForCompilation = 3;
+
+struct LastJobInfo {
+  time_t last_run_ns_{0};
+  size_t activities_last_compiled_{0};
+};
+
+LastJobInfo last_job_info_;
+std::mutex last_job_info_mutex_;
 
 // Gets the path of output compiled trace.
 db::CompiledTraceFileModel CalculateNewestFilePath(
@@ -240,6 +254,11 @@ bool CompileActivity(const db::DbHandle& db,
       return false;
     }
 
+    {
+      std::lock_guard<std::mutex> last_job_info_guard{last_job_info_mutex_};
+      last_job_info_.activities_last_compiled_++;
+    }
+
     // Show the compilation config.
     LOG(DEBUG) << "Try to compiled package_id: " << package_id
                << " package_name: " << package_name
@@ -308,12 +327,22 @@ bool CompilePackage(const db::DbHandle& db,
 
 // Compiled the perfetto traces for packages in a device.
 bool CompileAppsOnDevice(const db::DbHandle& db, const ControllerParameters& params) {
+  {
+    std::lock_guard<std::mutex> last_job_info_guard{last_job_info_mutex_};
+    last_job_info_.activities_last_compiled_ = 0;
+  }
+
   std::vector<db::PackageModel> packages = db::PackageModel::SelectAll(db);
   bool ret = true;
   for (db::PackageModel package : packages) {
     if (!CompilePackage(db, package.name, package.version, params)) {
       ret = false;
     }
+  }
+
+  {
+    std::lock_guard<std::mutex> last_job_info_guard{last_job_info_mutex_};
+    last_job_info_.last_run_ns_ = time(nullptr);
   }
 
   return ret;
@@ -353,6 +382,151 @@ bool Compile(const std::string& db_path,
     return false;
   }
   return CompileActivity(db, package->id, package_name, activity_name, version, params);
+}
+
+static std::string TimeToString(time_t the_time) {
+  tm tm_buf{};
+  tm* tm_ptr = localtime_r(&the_time, &tm_buf);
+
+  if (tm_ptr != nullptr) {
+    char time_buffer[256];
+    strftime(time_buffer, sizeof(time_buffer), "%a %b %d %H:%M:%S %Y", tm_ptr);
+    return std::string{time_buffer};
+  } else {
+    return std::string{"(nullptr)"};
+  }
+}
+
+static std::string GetTimestampForPrefetchFile(const db::PrefetchFileModel& prefetch_file) {
+  std::filesystem::path path{prefetch_file.file_path};
+
+  std::error_code ec{};
+  auto last_write_time = std::filesystem::last_write_time(path, /*out*/ec);
+  if (ec) {
+    return std::string("Failed to get last write time: ") + ec.message();
+  }
+
+  time_t time = decltype(last_write_time)::clock::to_time_t(last_write_time);
+
+  std::string time_str = TimeToString(time);
+  return time_str;
+}
+
+void DumpPackageActivity(const db::DbHandle& db,
+                         ::android::Printer& printer,
+                         const db::PackageModel& package,
+                         const db::ActivityModel& activity) {
+  int package_id = package.id;
+  const std::string& package_name = package.name;
+  int package_version = package.version;
+  const std::string& activity_name = activity.name;
+  db::VersionedComponentName vcn{package_name, activity_name, package_version};
+
+  // com.google.Settings/com.google.Settings.ActivityMain@1234567890
+  printer.printFormatLine("  %s/%s@%d",
+                          package_name.c_str(),
+                          activity_name.c_str(),
+                          package_version);
+
+  std::optional<db::PrefetchFileModel> prefetch_file =
+      db::PrefetchFileModel::SelectByVersionedComponentName(db, vcn);
+
+  std::vector<db::AppLaunchHistoryModel> histories =
+      db::AppLaunchHistoryModel::SelectActivityHistoryForCompile(db, activity.id);
+  std::vector<compiler::CompilationInput> perfetto_traces =
+        GetPerfettoTraceInfo(db, histories);
+
+  if (prefetch_file) {
+    bool exists_on_disk = std::filesystem::exists(prefetch_file->file_path);
+
+    std::optional<size_t> prefetch_byte_sum =
+        prefetcher::ReadAhead::PrefetchSizeInBytes(prefetch_file->file_path);
+
+    if (exists_on_disk) {
+      printer.printFormatLine("    Compiled Status: Usable compiled trace");
+    } else {
+      printer.printFormatLine("    Compiled Status: Prefetch file deleted from disk.");
+    }
+
+    if (prefetch_byte_sum) {
+      printer.printFormatLine("      Bytes to be prefetched: %zu", *prefetch_byte_sum);
+    } else {
+      printer.printFormatLine("      Bytes to be prefetched: (bad file path)" );
+    }
+
+    printer.printFormatLine("      Time compiled: %s",
+                            GetTimestampForPrefetchFile(*prefetch_file).c_str());
+    printer.printFormatLine("      %s", prefetch_file->file_path.c_str());
+  } else {
+    size_t size = perfetto_traces.size();
+
+    if (size >= kMinTracesForCompilation) {
+      printer.printFormatLine("    Compiled Status: Raw traces pending compilation (%zu)",
+                              perfetto_traces.size());
+    } else {
+      size_t remaining = kMinTracesForCompilation - size;
+      printer.printFormatLine("    Compiled Status: Need %zu more traces for compilation",
+                              remaining);
+    }
+  }
+
+  printer.printFormatLine("    Raw traces:");
+  printer.printFormatLine("      Trace count: %zu", perfetto_traces.size());
+
+  for (compiler::CompilationInput& compilation_input : perfetto_traces) {
+    std::string& raw_trace_file_name = compilation_input.filename;
+
+    printer.printFormatLine("      %s", raw_trace_file_name.c_str());
+  }
+}
+
+void DumpPackage(const db::DbHandle& db,
+                 ::android::Printer& printer,
+                 db::PackageModel package) {
+  std::vector<db::ActivityModel> activities =
+      db::ActivityModel::SelectByPackageId(db, package.id);
+
+  for (db::ActivityModel& activity : activities) {
+    DumpPackageActivity(db, printer, package, activity);
+  }
+}
+
+void DumpAllPackages(const db::DbHandle& db, ::android::Printer& printer) {
+  printer.printLine("Package history in database:");
+
+  std::vector<db::PackageModel> packages = db::PackageModel::SelectAll(db);
+  for (db::PackageModel package : packages) {
+    DumpPackage(db, printer, package);
+  }
+
+  printer.printLine("");
+}
+
+void Dump(const db::DbHandle& db, ::android::Printer& printer) {
+  bool locked = last_job_info_mutex_.try_lock();
+
+  LastJobInfo info = last_job_info_;
+
+  printer.printFormatLine("Background job:");
+  if (!locked) {
+    printer.printLine("""""  (possible deadlock)");
+  }
+  if (info.last_run_ns_ != time_t{0}) {
+    std::string time_str = TimeToString(info.last_run_ns_);
+
+    printer.printFormatLine("  Last run at: %s", time_str.c_str());
+  } else {
+    printer.printFormatLine("  Last run at: (None)");
+  }
+  printer.printFormatLine("  Activities last compiled: %zu", info.activities_last_compiled_);
+
+  printer.printLine("");
+
+  if (locked) {
+    last_job_info_mutex_.unlock();
+  }
+
+  DumpAllPackages(db, printer);
 }
 
 }  // namespace iorap::maintenance

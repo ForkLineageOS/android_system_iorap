@@ -16,6 +16,11 @@
 #define PREFETCHER_READAHEAD_H_
 
 #include <memory>
+#include <optional>
+
+namespace android {
+class Printer;
+}  // namespace android
 
 namespace iorap {
 namespace prefetcher {
@@ -35,6 +40,12 @@ class ReadAhead {
   void BeginTask(const TaskId& id);
   // Complete a task, releasing any memory/file descriptors associated with it.
   void FinishTask(const TaskId& id);
+
+  static void Dump(/*borrow*/::android::Printer& printer);
+
+  // Calculate the sum of file_lengths. Returns nullopt if the file path does not
+  // point to a valid compiled TraceFile.
+  static std::optional<size_t> PrefetchSizeInBytes(const std::string& file_path);
 
   ReadAhead(bool use_sockets);
 
