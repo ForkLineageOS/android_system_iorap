@@ -17,18 +17,25 @@
 #include <android-base/logging.h>
 #include <android-base/properties.h>
 
+#include <chrono>
+#include <thread>
+
 namespace iorap::binder {
 
+const constexpr int64_t kTimeoutMs = 60 * 1000; // 1 min
+const constexpr int64_t kIntervalMs = 1000; // 1 sec
+
 std::shared_ptr<PackageManagerRemote> PackageManagerRemote::Create() {
-  android::sp<IPackageManager> package_service = GetPackageService();
-  if (package_service == nullptr) {
-    return nullptr;
+  std::shared_ptr<PackageManagerRemote> package_manager =
+      std::make_shared<PackageManagerRemote>();
+  if (package_manager->ReconnectWithTimeout(kTimeoutMs)) {
+    return package_manager;
   }
-  return std::make_shared<PackageManagerRemote>(package_service);
+  return nullptr;
 }
 
 android::sp<IPackageManager> PackageManagerRemote::GetPackageService() {
-  auto binder = android::defaultServiceManager()->getService(
+  android::sp<android::IBinder> binder = android::defaultServiceManager()->getService(
       android::String16{"package_native"});
   if (binder == nullptr) {
     LOG(ERROR) << "Cannot get package manager service!";
@@ -41,20 +48,24 @@ android::sp<IPackageManager> PackageManagerRemote::GetPackageService() {
 std::optional<int64_t> PackageManagerRemote::GetPackageVersion(
     const std::string& package_name) {
   int64_t version_code;
-  auto status = package_service_->getVersionCodeForPackage(
-      android::String16(package_name.c_str()), &version_code);
-  if (!status.isOk()) {
-    LOG(WARNING) << "Failed to get version: " << status.toString8().c_str()
-                 << " for " << package_name;
+  android::binder::Status status = InvokeRemote(
+      [this, &version_code, &package_name]() {
+        return package_service_->getVersionCodeForPackage(
+            android::String16(package_name.c_str()), /*out*/&version_code);
+      });
+  if (status.isOk()) {
+    return version_code;
+  } else {
+    LOG(WARNING) << "Failed to get version: "
+                 << status.toString8().c_str()
+                 << " for " << package_name
+                 << ". Retry to connect package manager service.";
     return std::nullopt;
   }
-
-  return std::optional<int64_t>{version_code};
 }
 
 VersionMap PackageManagerRemote::GetPackageVersionMap() {
   VersionMap package_version_map;
-
   std::vector<std::string> packages = GetAllPackages();
   LOG(DEBUG) << "PackageManagerRemote::GetPackageVersionMap: "
              << packages.size()
@@ -73,12 +84,55 @@ VersionMap PackageManagerRemote::GetPackageVersionMap() {
 }
 
 std::vector<std::string> PackageManagerRemote::GetAllPackages() {
-  CHECK(package_service_ != nullptr);
   std::vector<std::string> packages;
-  auto status = package_service_->getAllPackages(/*out*/&packages);
-  if (!status.isOk()) {
-    LOG(ERROR) << "Failed to get all packages: " << status.toString8().c_str();
+  android::binder::Status status = InvokeRemote(
+      [this, &packages]() {
+        return package_service_->getAllPackages(/*out*/&packages);
+      });
+
+  if (status.isOk()) {
+    return packages;
   }
+
+  LOG(FATAL) << "Failed to get all packages: "
+             << status.toString8().c_str();
   return packages;
+
+}
+
+bool PackageManagerRemote::ReconnectWithTimeout(int64_t timeout_ms) {
+  int64_t count = 0;
+  package_service_ = nullptr;
+  std::chrono::duration interval = std::chrono::milliseconds(1000);
+  std::chrono::duration timeout = std::chrono::milliseconds(timeout_ms);
+
+  while (package_service_ == nullptr) {
+    LOG(WARNING) << "Reconnect to package manager service: " << ++count << " times";
+    package_service_ = GetPackageService();
+    std::this_thread::sleep_for(interval);
+    if (count * interval >= timeout) {
+      LOG(FATAL) << "Fail to create version map in "
+                 << timeout.count()
+                 << " seconds.";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+template <typename T>
+android::binder::Status PackageManagerRemote::InvokeRemote(T&& lambda) {
+  android::binder::Status status =
+      static_cast<android::binder::Status>(lambda());
+  if (status.isOk()) {
+    return status;
+  }
+
+  if (!ReconnectWithTimeout(kTimeoutMs)) {
+    return status;
+  }
+
+  return lambda();
 }
 }  // namespace iorap::package_manager
