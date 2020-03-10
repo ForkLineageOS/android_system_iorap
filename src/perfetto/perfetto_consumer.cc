@@ -422,20 +422,18 @@ struct PerfettoConsumerImpl::Impl {
       if (!handle_desc->read_trace_ns_) {
         handle_desc->read_trace_ns_ = handle_desc->last_transition_ns_;
 
-        CHECK(handle_desc->trace_cookie_.has_value())
-            << "Missing cookie for Handle: " << handle_desc->handle_;
-        atrace_async_end(ATRACE_TAG_ACTIVITY_MANAGER,
-                         "Perfetto Scoped Trace",
-                         handle_desc->trace_cookie_.value());
+        if (handle_desc->trace_cookie_.has_value() && !handle_desc->trace_ended_) {
+          atrace_async_end(ATRACE_TAG_ACTIVITY_MANAGER,
+                           "Perfetto Scoped Trace",
+                           handle_desc->trace_cookie_.value());
 
-        handle_desc->trace_ended_ = true;
+          handle_desc->trace_ended_ = true;
+        }
       }
     }
 
     // If Destroy is called prior to ReadTrace, mark the atrace as finished.
-    if (kind == StateKind::kDestroyed && trace_cookie_ && !handle_desc->trace_ended_) {
-      CHECK(handle_desc->trace_cookie_.has_value())
-          << "Missing cookie for Handle: " << handle_desc->handle_;
+    if (kind == StateKind::kDestroyed && handle_desc->trace_cookie_ && !handle_desc->trace_ended_) {
       atrace_async_end(ATRACE_TAG_ACTIVITY_MANAGER,
                        "Perfetto Scoped Trace",
                        *handle_desc->trace_cookie_);
