@@ -585,18 +585,20 @@ class PackageModel : public Model {
     return p;
   }
 
-  static std::optional<PackageModel> SelectByName(DbHandle db, const char* name) {
+  static std::vector<PackageModel> SelectByName(DbHandle db, const char* name) {
     ScopedLockDb lock{db};
 
-    std::string query = "SELECT * FROM packages WHERE name = ?1 LIMIT 1;";
+    std::string query = "SELECT * FROM packages WHERE name = ?1;";
     DbStatement stmt = DbStatement::Prepare(db, query, name);
 
+    std::vector<PackageModel> packages;
+
     PackageModel p{db};
-    if (!DbQueryBuilder::SelectOnce(stmt, p.id, p.name, p.version)) {
-      return std::nullopt;
+    while (DbQueryBuilder::SelectOnce(stmt, p.id, p.name, p.version)) {
+      packages.push_back(p);
     }
 
-    return p;
+    return packages;
   }
 
   static std::optional<PackageModel> SelectByNameAndVersion(DbHandle db,

@@ -175,9 +175,11 @@ cc_binary {
         "iorapd.rc",
     ],
     // iorapd fork+execs into iorap.prefetcherd and iorap.cmd.compiler
+    // maintenance used by tests
     required: [
         "iorap.cmd.compiler",
         "iorap.prefetcherd",
+        "iorap.cmd.maintenance",
     ],
 }
 
