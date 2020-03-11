@@ -15,6 +15,7 @@
 #include "common/debug.h"
 #include "compiler/compiler.h"
 #include "maintenance/controller.h"
+#include "db/clean_up.h"
 
 #include <android-base/parseint.h>
 #include <android-base/properties.h>
@@ -39,8 +40,8 @@ void Usage(char** argv) {
   std::cerr << "    --activity $,-a $          Activity name." << std::endl;
   std::cerr << "    --inode-textcache $,-it $  Resolve inode->filename from textcache." << std::endl;
   std::cerr << "    --help,-h                  Print this Usage." << std::endl;
-  std::cerr << "    --recompile,-r             Force re-compilation, which replace the existing compiled trace ."
-            << std::endl;
+  std::cerr << "    --recompile,-r             Force re-compilation, which replace the existing compiled trace ." << std::endl;
+  std::cerr << "    --purge-package,-pp        Purge all files associated with a package." << std::endl;
   std::cerr << "    --verbose,-v               Set verbosity (default off)." << std::endl;
   std::cerr << "    --output-text,-ot          Output ascii text instead of protobuf (default off)." << std::endl;
   std::cerr << "    --min_traces,-mt           The min number of perfetto traces needed for compilation (default 1)."
@@ -60,6 +61,7 @@ int Main(int argc, char** argv){
 
   std::vector<std::string> arg_input_filenames;
   std::optional<std::string> arg_package;
+  std::optional<std::string> arg_purge_package;
   int arg_version = -1;
   std::optional<std::string> arg_activity;
   std::optional<std::string> arg_inode_textcache;
@@ -108,7 +110,15 @@ int Main(int argc, char** argv){
       }
       arg_inode_textcache = arg_next;
       ++arg;
-    } else if (argstr == "--verbose" || argstr == "-v") {
+    } else if (argstr == "--purge-package" || argstr == "-pp") {
+      if (!has_arg_next) {
+        std::cerr << "Missing --purge-package <value>" << std::endl;
+        return 1;
+      }
+      arg_purge_package = arg_next;
+      ++arg;
+    }
+    else if (argstr == "--verbose" || argstr == "-v") {
       enable_verbose = true;
     } else if (argstr == "--recompile" || argstr == "-r") {
       recompile = true;
@@ -134,7 +144,7 @@ int Main(int argc, char** argv){
     Usage(argv);
   }
 
-  std::string db = arg_input_filenames[0];
+  std::string db_path = arg_input_filenames[0];
 
   if (enable_verbose) {
     android::base::SetMinimumLogSeverity(android::base::VERBOSE);
@@ -143,6 +153,12 @@ int Main(int argc, char** argv){
     LOG(VERBOSE) << "Debug check: " << ::iorap::kIsDebugBuild;
   } else {
     android::base::SetMinimumLogSeverity(android::base::DEBUG);
+  }
+
+  if (arg_purge_package) {
+    db::CleanUpFilesForPackage(db_path, *arg_purge_package);
+    return 0;
+    // Don't do any more work because SchemaModel can only be created once.
   }
 
   maintenance::ControllerParameters params{
@@ -155,15 +171,15 @@ int Main(int argc, char** argv){
 
   int ret_code = 0;
   if (arg_package && arg_activity) {
-    ret_code = !Compile(std::move(db),
+    ret_code = !Compile(std::move(db_path),
                         std::move(*arg_package),
                         std::move(*arg_activity),
                         arg_version,
                         params);
   } else if (arg_package) {
-    ret_code = !Compile(std::move(db), std::move(*arg_package), arg_version, params);
+    ret_code = !Compile(std::move(db_path), std::move(*arg_package), arg_version, params);
   } else {
-    ret_code = !Compile(std::move(db), params);
+    ret_code = !Compile(std::move(db_path), params);
   }
   return ret_code;
 }

@@ -40,6 +40,7 @@ void CleanUpFilesForActivity(const db::DbHandle& db,
     std::string file_path = raw_trace.file_path;
     LOG(DEBUG) << "Remove file: " << file_path;
     std::filesystem::remove(file_path.c_str());
+    raw_trace.Delete();
   }
 
   // Remove compiled traces.
@@ -50,6 +51,7 @@ void CleanUpFilesForActivity(const db::DbHandle& db,
     std::string file_path = prefetch_file->file_path;
     LOG(DEBUG) << "Remove file: " << file_path;
     std::filesystem::remove(file_path.c_str());
+    prefetch_file->Delete();
   }
 }
 
@@ -72,6 +74,27 @@ void CleanUpFilesForDb(const db::DbHandle& db) {
   std::vector<db::PackageModel> packages = db::PackageModel::SelectAll(db);
   for (db::PackageModel package : packages) {
       CleanUpFilesForPackage(db, package.id, package.name, package.version);
+  }
+}
+
+void CleanUpFilesForPackage(const std::string& db_path,
+                            const std::string& package_name) {
+  iorap::db::SchemaModel db_schema = db::SchemaModel::GetOrCreate(db_path);
+  db::DbHandle db{db_schema.db()};
+  CleanUpFilesForPackage(db, package_name);
+}
+
+
+void CleanUpFilesForPackage(const db::DbHandle& db,
+                            const std::string& package_name) {
+  std::vector<PackageModel> packages = PackageModel::SelectByName(db, package_name.c_str());;
+
+  for (PackageModel& package : packages) {
+    CleanUpFilesForPackage(db, package.id, package.name, package.version);
+  }
+
+  if (packages.empty()) {
+    LOG(DEBUG) << "No package rows to clean up " << package_name;
   }
 }
 

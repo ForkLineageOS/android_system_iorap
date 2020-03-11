@@ -32,6 +32,14 @@ void CleanUpFilesForPackage(const db::DbHandle& db,
                             int package_id,
                             const std::string& package_name,
                             int64_t version);
+
+// Clean up all package rows (and files) associated with a package by name.
+void CleanUpFilesForPackage(const std::string& db_path,
+                            const std::string& package_name);
+
+// Clean up all package rows (and files) associated with a package by name.
+void CleanUpFilesForPackage(const db::DbHandle& db,
+                            const std::string& package_name);
 }  // namespace iorap::db
 
 #endif  // IORAP_SRC_DB_CLEANER_H_
