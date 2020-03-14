@@ -58,9 +58,9 @@ class ControllerTest: public ::testing::Test {
     // The db is a fake db with the following tables:
     //
     // packages:
-    // id, name
-    // 1, com.android.settings
-    // 2, com.yawanng
+    // id, name, version
+    // 1, com.android.settings, 1
+    // 2, com.yawanng, 1
     //
     // activities:
     // id, name
@@ -115,7 +115,7 @@ TEST_F(ControllerTest, CompilationController) {
 
   setenv("IORAPD_ROOT_DIR", root_path.path ,1);
   std::string compiled_trace_path = std::string(root_path.path) +
-      "/com.android.settings/none/Setting/compiled_traces/compiled_trace.pb";
+      "/com.android.settings/1/Setting/compiled_traces/compiled_trace.pb";
 
   // No recompile
   ControllerParameters params{
