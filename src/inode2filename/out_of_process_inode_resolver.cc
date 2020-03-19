@@ -401,15 +401,20 @@ rxcpp::observable<InodeResult>
 
 rxcpp::observable<InodeResult>
     OutOfProcessInodeResolver::EmitAll() const {
+  auto self = std::static_pointer_cast<const OutOfProcessInodeResolver>(shared_from_this());
+  CHECK(self != nullptr);
+  CHECK(self->impl_ != nullptr);
+
   return rxcpp::observable<>::create<InodeResult>(
-    [self=std::static_pointer_cast<const OutOfProcessInodeResolver>(shared_from_this())](
-        rxcpp::subscriber<InodeResult> s) {
+    [self](rxcpp::subscriber<InodeResult> s) {
+      CHECK(self != nullptr);
+      CHECK(self->impl_ != nullptr);
       self->impl_->EmitFromCommandAll(s, self->GetDependencies());
   });
 }
 
 OutOfProcessInodeResolver::OutOfProcessInodeResolver(InodeResolverDependencies dependencies)
-  : InodeResolver{std::move(dependencies)}, impl_{} {
+  : InodeResolver{std::move(dependencies)}, impl_{new Impl{}} {
 }
 
 OutOfProcessInodeResolver::~OutOfProcessInodeResolver() {
