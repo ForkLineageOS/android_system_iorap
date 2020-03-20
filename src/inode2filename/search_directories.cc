@@ -53,11 +53,45 @@ using android::base::StringPrintf;  // NOLINT
 
 namespace iorap::inode2filename {
 
+#define DEBUG_INODE_SET 0
+
 // A multimap of 'ino_t -> List[Inode]' (where the value Inodes have the same ino_t as the key).
 //
 // A flat list of Inodes is turned into the above map, then keys can be removed one at a time
 // until the InodeSet eventually becomes empty.
 struct InodeSet {
+
+  InodeSet() = default;
+#if DEBUG_INODE_SET
+  InodeSet(const InodeSet& other) {
+    LOG(INFO) << "InodeSet-copyctor";
+    set_ = other.set_;
+  }
+
+  InodeSet(InodeSet&& other) {
+    LOG(INFO) << "InodeSet-movector";
+    set_ = std::move(other.set_);
+  }
+
+  InodeSet& operator=(const InodeSet& other) {
+    LOG(INFO) << "InodeSet-opassign-copy";
+    set_ = other.set_;
+    return *this;
+  }
+
+  InodeSet& operator=(InodeSet&& other) {
+    LOG(INFO) << "InodeSet-opassign-move";
+    set_ = std::move(other.set_);
+    return *this;
+  }
+#else
+  InodeSet(InodeSet&& other) = default;
+  InodeSet& operator=(InodeSet&& other) = default;
+  // Copying InodeSet can be very expensive, refuse to even allow compiling such code.
+  InodeSet(const InodeSet& other) = delete;
+  InodeSet& operator=(const InodeSet& other) = delete;
+#endif
+
   struct ValueRange {
     auto/*Iterable<Inode>*/ begin() {
       return begin_;
@@ -713,6 +747,12 @@ struct SearchState {
   // The InodeSet removes any matching 'Inode'.
   std::optional<SearchMatch> match;
 
+  SearchState() = default;
+  SearchState(SearchState&& other) = default;
+
+  // Do not copy this because copying InodeSet is excruciatingly slow.
+  SearchState(const SearchState& other) = delete;
+
   // TODO: make sure this doesn't copy [inodes], as that would be unnecessarily expensive.
 };
 
@@ -755,18 +795,19 @@ auto/*[observable<InodeResult>, connectable]*/ SearchDirectoriesForMatchingInode
   // DirectoryEntry is missing the dev_t portion, so we may need to call scan(2) again
   // to confirm the dev_t. We skip calling scan(2) when the ino_t does not match.
   // InodeSet lets us optimally avoid calling scan(2).
-  SearchState initial;
-  initial.inode_set = InodeSet::OfList(inode_search_list);
+  std::shared_ptr<SearchState> initial = std::make_shared<SearchState>();
+  initial->inode_set = InodeSet::OfList(inode_search_list);
 
   auto/*[observable<SearchState>,Connectable]*/ search_state_results = find_all_subdir_entries.scan(
       std::move(initial),
-      [system_call=system_call](SearchState search_state, const DirectoryEntry& dir_entry) {
+      [system_call=system_call](std::shared_ptr<SearchState> search_state,
+                                const DirectoryEntry& dir_entry) {
         LOG(VERBOSE) << "SearchDirectoriesForMatchingInodes#Scan "
-                     << dir_entry << ", state: " << search_state;
+                     << dir_entry << ", state: " << *search_state;
 
-        search_state.match = std::nullopt;
+        search_state->match = std::nullopt;
 
-        InodeSet* inodes = &search_state.inode_set;
+        InodeSet* inodes = &search_state->inode_set;
 
         // Find all the possible inodes across different devices.
         InodeSet::ValueRange inode_list = inodes->FindInodeList(dir_entry.d_ino);
@@ -782,23 +823,23 @@ auto/*[observable<InodeResult>, connectable]*/ SearchDirectoriesForMatchingInode
           std::optional<Inode> inode = inodes->FindAndRemoveInodeInList(inode_list, stat_buf);
 
           if (inode) {
-            search_state.match = SearchMatch{inode.value(), dir_entry.filename};
+            search_state->match = SearchMatch{inode.value(), dir_entry.filename};
           }
         });
 
-        return search_state;  // implicit move.
+        return search_state;
       }
   // Avoid exhausting a potentially 'infinite' stream of files by terminating as soon
   // as we find every single inode we care about.
-  ).take_while([](const SearchState& state) {
+  ).take_while([](std::shared_ptr<SearchState> state) {
       // Also emit the last item that caused the search set to go empty.
-      bool cond = !state.inode_set.Empty() || state.match;
+      bool cond = !state->inode_set.Empty() || state->match;
 
       if (WOULD_LOG(VERBOSE)) {
         static int kCounter = 0;
         LOG(VERBOSE) << "SearchDirectoriesForMatchingInodes#take_while (" << kCounter++ <<
                      ",is_empty:"
-                     << state.inode_set.Empty() << ", match:" << state.match.has_value();
+                     << state->inode_set.Empty() << ", match:" << state->match.has_value();
       }
       // Minor O(1) implementation inefficiency:
       // (Too minor to fix but it can be strange if looking at the logs or readdir traces).
@@ -820,7 +861,7 @@ auto/*[observable<InodeResult>, connectable]*/ SearchDirectoriesForMatchingInode
 
       if (!cond) {
         LOG(VERBOSE) << "SearchDirectoriesForMatchingInodes#take_while "
-                     << "should now terminate for " << state;
+                     << "should now terminate for " << *state;
       }
 
       return cond;
@@ -841,8 +882,10 @@ auto/*[observable<InodeResult>, connectable]*/ SearchDirectoriesForMatchingInode
   //    The 'matched_inode_values' only touches the match.
   // Either stream can 'std::move' from those fields because they don't move each other's fields.
   auto/*observable<InodeResult>*/ matched_inode_values = search_state_results
-      .filter([](const SearchState& search_state) { return search_state.match.has_value(); })
-      .map([](SearchState& search_state) { return std::move(search_state.match.value()); })
+      .filter([](std::shared_ptr<SearchState> search_state) {
+                  return search_state->match.has_value(); })
+      .map([](std::shared_ptr<SearchState> search_state) {
+                  return std::move(search_state->match.value()); })
                      // observable<SearchMatch>
       .map([](SearchMatch search_match) {
           return InodeResult::makeSuccess(search_match.inode, std::move(search_match.filename));
@@ -851,10 +894,10 @@ auto/*[observable<InodeResult>, connectable]*/ SearchDirectoriesForMatchingInode
   auto/*observable<?>*/ unmatched_inode_values = search_state_results
       // The 'last' SearchState is the one that contains all the remaining inodes.
       .take_last(1)  // observable<SearchState>
-      .flat_map([](const SearchState& search_state) {
+      .flat_map([](std::shared_ptr<SearchState> search_state) {
           LOG(VERBOSE) << "SearchDirectoriesForMatchingInodes#unmatched -- flat_map";
           // Aside: Could've used a move here if the inodes weren't so lightweight already.
-          return search_state.inode_set.IterateValues(); })
+          return search_state->inode_set.IterateValues(); })
                      // observable<Inode>
       .map([](const Inode& inode) {
           LOG(VERBOSE) << "SearchDirectoriesForMatchingInodes#unmatched -- map";
@@ -1004,7 +1047,11 @@ struct FilterState {
   // The InodeSet removes any matching 'Inode'.
   std::optional<InodeResult> match;
 
-  // TODO: make sure this doesn't copy [inodes], as that would be unnecessarily expensive.
+  FilterState() = default;
+  FilterState(FilterState&& other) = default;
+
+  // Copying the InodeSet is expensive, so forbid any copies.
+  FilterState(const FilterState& other) = delete;
 };
 
 std::ostream& operator<<(std::ostream& os, const FilterState& s) {
@@ -1031,19 +1078,19 @@ rxcpp::observable<InodeResult> SearchDirectories::FilterFilenamesForSpecificInod
   // InodeResult may be missing the dev_t portion, so we may need to call scan(2) again
   // to confirm the dev_t. We skip calling scan(2) when the ino_t does not match.
   // InodeSet lets us optimally avoid calling scan(2).
-  FilterState initial;
-  initial.inode_set = InodeSet::OfList(inode_list);
+  std::shared_ptr<FilterState> initial = std::make_shared<FilterState>();
+  initial->inode_set = InodeSet::OfList(inode_list);
 
   auto/*[observable<FilterState>,Connectable]*/ filter_state_results = all_inodes.scan(
       std::move(initial),
       [system_call, missing_device_number]
-          (FilterState filter_state, InodeResult inode_result) {
+          (std::shared_ptr<FilterState> filter_state, InodeResult inode_result) {
         LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#Scan "
-                     << inode_result << ", state: " << filter_state;
+                     << inode_result << ", state: " << *filter_state;
 
-        filter_state.match = std::nullopt;
+        filter_state->match = std::nullopt;
 
-        InodeSet* inodes = &filter_state.inode_set;
+        InodeSet* inodes = &filter_state->inode_set;
 
         // Find all the possible (dev_t, ino_t) potential needles given an ino_t in the haystack.
         InodeSet::ValueRange inode_list = inodes->FindInodeList(inode_result.inode.inode);
@@ -1063,7 +1110,7 @@ rxcpp::observable<InodeResult> SearchDirectories::FilterFilenamesForSpecificInod
               std::optional<Inode> inode = inodes->FindAndRemoveInodeInList(inode_list, stat_buf);
 
               if (inode) {
-                filter_state.match = InodeResult::makeSuccess(inode.value(), std::move(filename));
+                filter_state->match = InodeResult::makeSuccess(inode.value(), std::move(filename));
               }
             });
 
@@ -1079,26 +1126,26 @@ rxcpp::observable<InodeResult> SearchDirectories::FilterFilenamesForSpecificInod
                 inodes->FindAndRemoveInodeInList(inode_list, inode_result.inode);
 
             if (inode) {
-              filter_state.match = inode_result;
+              filter_state->match = inode_result;
             }
 
             // Note that the InodeResult doesn't necessarily need to have a valid filename here.
             // If the earlier pass returned an error-ed result, this will forward the error code.
         }
 
-        return filter_state;  // implicit move.
+        return filter_state;
       }
   // Avoid exhausting a potentially 'infinite' stream of files by terminating as soon
   // as we find every single inode we care about.
-  ).take_while([](const FilterState& state) {
+  ).take_while([](std::shared_ptr<FilterState> state) {
       // Also emit the last item that caused the search set to go empty.
-      bool cond = !state.inode_set.Empty() || state.match;
+      bool cond = !state->inode_set.Empty() || state->match;
 
       if (WOULD_LOG(VERBOSE)) {
         static int kCounter = 0;
         LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#take_while (" << kCounter++ <<
                      ",is_empty:"
-                     << state.inode_set.Empty() << ", match:" << state.match.has_value();
+                     << state->inode_set.Empty() << ", match:" << state->match.has_value();
       }
       // Minor O(1) implementation inefficiency:
       // (Too minor to fix but it can be strange if looking at the logs or readdir traces).
@@ -1120,7 +1167,7 @@ rxcpp::observable<InodeResult> SearchDirectories::FilterFilenamesForSpecificInod
 
       if (!cond) {
         LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#take_while "
-                     << "should now terminate for " << state;
+                     << "should now terminate for " << *state;
       }
 
       return cond;
@@ -1141,17 +1188,19 @@ rxcpp::observable<InodeResult> SearchDirectories::FilterFilenamesForSpecificInod
   //    The 'matched_inode_values' only touches the match.
   // Either stream can 'std::move' from those fields because they don't move each other's fields.
   auto/*observable<InodeResult>*/ matched_inode_values = filter_state_results
-      .filter([](const FilterState& filter_state) { return filter_state.match.has_value(); })
-      .map([](FilterState& filter_state) { return std::move(filter_state.match.value()); });
+      .filter([](std::shared_ptr<FilterState> filter_state) {
+                  return filter_state->match.has_value(); })
+      .map([](std::shared_ptr<FilterState> filter_state) {
+                  return std::move(filter_state->match.value()); });
                      // observable<InodeResult>
 
   auto/*observable<?>*/ unmatched_inode_values = filter_state_results
       // The 'last' FilterState is the one that contains all the remaining inodes.
       .take_last(1)  // observable<FilterState>
-      .flat_map([](const FilterState& filter_state) {
+      .flat_map([](std::shared_ptr<FilterState> filter_state) {
           LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#unmatched -- flat_map";
           // Aside: Could've used a move here if the inodes weren't so lightweight already.
-          return filter_state.inode_set.IterateValues(); })
+          return filter_state->inode_set.IterateValues(); })
                      // observable<Inode>
       .map([](const Inode& inode) {
           LOG(VERBOSE) << "FilterFilenamesForSpecificInodes#unmatched -- map";
