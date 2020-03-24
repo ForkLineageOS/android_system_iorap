@@ -173,8 +173,7 @@ std::vector<compiler::CompilationInput> GetPerfettoTraceInfo(
     std::optional<db::RawTraceModel> raw_trace =
         db::RawTraceModel::SelectByHistoryId(db, history.id);
     if (!raw_trace) {
-      LOG(ERROR) << "Cannot find raw trace for history_id: "
-                 << history.id;
+      // This is normal: non-cold launches do not have traces.
       continue;
     }
 
@@ -225,6 +224,8 @@ bool CompileActivity(const db::DbHandle& db,
   ScopedFormatTrace atrace_compile_package(ATRACE_TAG_PACKAGE_MANAGER,
                                            "Compile activity %s",
                                            activity_name.c_str());
+
+  LOG(DEBUG) << "CompileActivity: " << package_name << "/" << activity_name << "@" << version;
 
   db::CompiledTraceFileModel output_file =
       CalculateNewestFilePath(package_name, activity_name, version);
