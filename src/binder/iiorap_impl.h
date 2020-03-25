@@ -18,6 +18,8 @@
 #define IORAP_BINDER_IIORAP_IMPL_H
 
 #include "binder/iiorap_def.h"
+#include "binder/package_change_observer.h"
+#include "binder/package_manager_remote.h"
 #include "common/macros.h"
 
 #include "com/google/android/startop/iorap/BnIorap.h"
@@ -68,7 +70,6 @@ private:
 
   std::unique_ptr<Impl> impl_;
 };
-
 }
 }
 

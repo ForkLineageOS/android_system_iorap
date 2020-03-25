@@ -135,4 +135,54 @@ android::binder::Status PackageManagerRemote::InvokeRemote(T&& lambda) {
 
   return lambda();
 }
+
+void PackageManagerRemote::RegisterPackageChangeObserver(
+    android::sp<PackageChangeObserver> observer) {
+  LOG(DEBUG) << "Register package change observer.";
+  android::binder::Status status = InvokeRemote(
+      [this, &observer]() {
+        return package_service_->registerPackageChangeObserver(observer);
+      });
+
+  if (!status.isOk()) {
+    LOG(FATAL) << "Cannot register package change observer.";
+  }
+}
+
+void PackageManagerRemote::UnregisterPackageChangeObserver(
+    android::sp<PackageChangeObserver> observer) {
+  LOG(DEBUG) << "Unregister package change observer.";
+  android::binder::Status status = InvokeRemote(
+      [this, &observer]() {
+        return package_service_->unregisterPackageChangeObserver(observer);
+      });
+
+  if (!status.isOk()) {
+    LOG(WARNING) << "Cannot unregister package change observer.";
+  }
+}
+
+void PackageManagerRemote::RegisterPackageManagerDeathRecipient(
+    android::sp<PackageManagerDeathRecipient> death_recipient) {
+  LOG(DEBUG) << "Register package manager death recipient.";
+  android::status_t status =
+      android::IInterface::asBinder(package_service_.get())->linkToDeath(death_recipient);
+
+  if (status == android::OK) {
+    return;
+  }
+
+  if (!ReconnectWithTimeout(kTimeoutMs) ||
+      android::OK != android::IInterface::asBinder(
+          package_service_.get())->linkToDeath(death_recipient)) {
+    LOG(FATAL) << "Failed to register package manager death recipient.";
+  }
+}
+
+void PackageManagerDeathRecipient::binderDied(const android::wp<android::IBinder>& /* who */) {
+  LOG(DEBUG) << "PackageManagerDeathRecipient::binderDied try to re-register";
+  package_manager_->RegisterPackageChangeObserver(observer_);
+  package_manager_->
+      RegisterPackageManagerDeathRecipient(this);
+}
 }  // namespace iorap::package_manager

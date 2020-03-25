@@ -102,6 +102,10 @@ class IIorapImpl::Impl {
   };
 
  public:
+  ~Impl() {
+    package_manager_->UnregisterPackageChangeObserver(package_change_observer_);
+  }
+
   void SetTaskListener(const ::android::sp<ITaskListener>& listener) {
     ::android::sp<ITaskListener> old_listener = listener_;
     if (old_listener != nullptr && listener != nullptr) {
@@ -201,10 +205,31 @@ class IIorapImpl::Impl {
 
     service_params_.event_manager_->SetTaskResultCallbacks(
       std::static_pointer_cast<manager::TaskResultCallbacks>(event_manager_callbacks_));
+
+    // Init the package change observer.
+    package_manager_ = PackageManagerRemote::Create();
+
+    if (package_manager_ == nullptr) {
+      LOG(FATAL) << "Failed to get package manager service in IIorapImpl::Impl";
+      return;
+    }
+
+    package_change_observer_ =
+        new PackageChangeObserver(service_params_.event_manager_);
+    package_manager_death_recipient_ =
+        new PackageManagerDeathRecipient(package_manager_, package_change_observer_);
+
+    package_manager_->RegisterPackageChangeObserver(package_change_observer_);
+    package_manager_->
+        RegisterPackageManagerDeathRecipient(package_manager_death_recipient_);
+
   }
 
   ServiceParams service_params_;
   std::shared_ptr<EventManagerTaskCallbacks> event_manager_callbacks_;
+  android::sp<PackageChangeObserver> package_change_observer_;
+  android::sp<PackageManagerDeathRecipient> package_manager_death_recipient_;
+  std::shared_ptr<PackageManagerRemote> package_manager_;
 };
 
 using Impl = IIorapImpl::Impl;
