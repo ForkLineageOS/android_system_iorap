@@ -64,6 +64,9 @@ int main(int /*argc*/, char** argv) {
     }
   }
 
+  // This must be logged after all other initialization has finished.
+  LOG(INFO) << kServiceName << " (the prefetchening) readied up";
+
   event_manager->Join();  // TODO: shutdown somewhere?
   // Block until something else shuts down the binder service.
   android::IPCThreadState::self()->joinThreadPool();
