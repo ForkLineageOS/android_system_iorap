@@ -25,9 +25,12 @@
 
 namespace iorap::db {
 
-// Clean up perfetto traces and compiled traces stored in the db.
+// Clean up perfetto traces and compiled traces in disk and rows
+// in raw_traces and prefetch_files in the db.
 void CleanUpFilesForDb(const db::DbHandle& db);
 
+// Clean up perfetto traces and compiled traces in disk and rows
+// in raw_traces and prefetch_files in the db for a package id.
 void CleanUpFilesForPackage(const db::DbHandle& db,
                             int package_id,
                             const std::string& package_name,
@@ -40,6 +43,12 @@ void CleanUpFilesForPackage(const std::string& db_path,
 // Clean up all package rows (and files) associated with a package by name.
 void CleanUpFilesForPackage(const db::DbHandle& db,
                             const std::string& package_name);
+// Clean up perfetto traces and compiled traces in disk and rows
+// in raw_traces and prefetch_files in the db for a package name
+// and version.
+void CleanUpFilesForPackage(const db::DbHandle& db,
+                            const std::string& package_name,
+                            int64_t version);
 }  // namespace iorap::db
 
 #endif  // IORAP_SRC_DB_CLEANER_H_

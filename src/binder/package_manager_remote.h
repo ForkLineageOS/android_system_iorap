@@ -15,6 +15,8 @@
 #ifndef IORAP_SRC_PACKAGE_MANAGER_REMOTE_H_
 #define IORAP_SRC_PACKAGE_MANAGER_REMOTE_H_
 
+#include "binder/package_change_observer.h"
+
 #include <android/content/pm/IPackageManagerNative.h>
 #include <binder/IServiceManager.h>
 
@@ -27,6 +29,22 @@ using IPackageManager = android::content::pm::IPackageManagerNative;
 // A map between package name and its version.
 using VersionMap = std::unordered_map<std::string, int64_t>;
 
+class PackageManagerRemote;
+
+class PackageManagerDeathRecipient : public android::IBinder::DeathRecipient {
+public:
+  PackageManagerDeathRecipient(std::shared_ptr<PackageManagerRemote> package_manager,
+                               android::sp<PackageChangeObserver> observer) :
+    package_manager_(package_manager), observer_(observer) {}
+  // android::IBinder::DeathRecipient override:
+  void binderDied(const android::wp<android::IBinder>& /* who */) override;
+
+private:
+  std::shared_ptr<PackageManagerRemote> package_manager_;
+
+  android::sp<PackageChangeObserver> observer_;
+};
+
 class PackageManagerRemote {
  public:
   static std::shared_ptr<PackageManagerRemote> Create();
@@ -36,6 +54,13 @@ class PackageManagerRemote {
 
   // Gets a map of package name and its version.
   VersionMap GetPackageVersionMap();
+
+  void RegisterPackageChangeObserver(android::sp<PackageChangeObserver> observer);
+
+  void UnregisterPackageChangeObserver(android::sp<PackageChangeObserver> observer);
+
+  void RegisterPackageManagerDeathRecipient(
+      android::sp<PackageManagerDeathRecipient> death_recipient);
 
  private:
   template <typename T>

@@ -34,7 +34,16 @@ class PackageVersionMap {
       : package_manager_(package_manager),
         version_map_(version_map) {}
 
-  void Update();
+  // Updates the version specified by 'package_name' to 'version'.
+  //
+  // Post-condition: Find(package_name) == version.
+  // * if the package is newly installed, insert and return true.
+  // * if the package version is changed, update the version to the
+  //   given one and return true.
+  // * otherwise, return false.
+  bool Update(std::string package_name, int64_t version);
+
+  void UpdateAll();
 
   // Finds the version of the package in the hash table.
   // -1 means the app is installed by unversioned.
