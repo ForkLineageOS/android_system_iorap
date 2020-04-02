@@ -113,7 +113,9 @@ bool PackageManagerRemote::ReconnectWithTimeout(int64_t timeout_ms) {
     if (count * interval >= timeout) {
       LOG(FATAL) << "Fail to create version map in "
                  << timeout.count()
-                 << " seconds.";
+                 << " milliseconds."
+                 << " Reason: Failed to connect to package manager service."
+                 << " Is system_server down?";
       return false;
     }
   }
