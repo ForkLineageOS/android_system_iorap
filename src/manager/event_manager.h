@@ -89,6 +89,18 @@ class EventManager {
   // Print to adb shell dumpsys (for bugreport info).
   void Dump(/*borrow*/::android::Printer& printer);
 
+  // A dumpsys --refresh-properties command signaling that we should
+  // refresh our system properties.
+  void RefreshSystemProperties(::android::Printer& printer);
+
+  // A dumpsys --purge-package <name> command signaling
+  // that all db rows and files associated with a package should be deleted.
+  bool PurgePackage(::android::Printer& printer, const std::string& package_name);
+
+  // A dumpsys --compile-package <name> command signaling
+  // that a package should be recompiled.
+  bool CompilePackage(::android::Printer& printer, const std::string& package_name);
+
   class Impl;
  private:
   std::unique_ptr<Impl> impl_;
