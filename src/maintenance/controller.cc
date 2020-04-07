@@ -269,9 +269,20 @@ bool CompileActivity(const db::DbHandle& db,
 
   std::string file_path = output_file.FilePath();
 
-  if (!params.recompile && std::filesystem::exists(file_path)) {
-    LOG(DEBUG) << "compiled trace exists in " << file_path;
-    return true;
+  if (!params.recompile) {
+    if (std::filesystem::exists(file_path)) {
+      LOG(DEBUG) << "compiled trace exists in " << file_path;
+
+      db::VersionedComponentName vcn{package_name, activity_name, version};
+      std::optional<db::PrefetchFileModel> prefetch_file =
+          db::PrefetchFileModel::SelectByVersionedComponentName(db, vcn);
+      if (prefetch_file) {
+        return true;
+      } else {
+        LOG(WARNING) << "Missing corresponding prefetch_file db row for " << vcn;
+        // let it go and compile again. we'll insert the prefetch_file at the bottom.
+      }
+    }
   }
 
   std::optional<db::ActivityModel> activity =
