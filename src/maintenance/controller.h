@@ -102,6 +102,10 @@ bool Compile(const std::string& db_path,
 // Visible for testing.
 bool CompileAppsOnDevice(const db::DbHandle& db, const ControllerParameters& params);
 
+bool CompileSingleAppOnDevice(const db::DbHandle& db,
+                              const ControllerParameters& params,
+                              const std::string& package_name);
+
 void Dump(const db::DbHandle& db, ::android::Printer& printer);
 
 } // iorap::maintenance
