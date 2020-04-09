@@ -409,6 +409,21 @@ bool CompileAppsOnDevice(const db::DbHandle& db, const ControllerParameters& par
   return ret;
 }
 
+// Compiled the perfetto traces for a single package in a device.
+bool CompileSingleAppOnDevice(const db::DbHandle& db,
+                              const ControllerParameters& params,
+                              const std::string& package_name) {
+  std::vector<db::PackageModel> packages = db::PackageModel::SelectByName(db, package_name.c_str());
+  bool ret = true;
+  for (db::PackageModel package : packages) {
+    if (!CompilePackage(db, package.name, package.version, params)) {
+      ret = false;
+    }
+  }
+
+  return ret;
+}
+
 bool Compile(const std::string& db_path, const ControllerParameters& params) {
   iorap::db::SchemaModel db_schema = db::SchemaModel::GetOrCreate(db_path);
   db::DbHandle db{db_schema.db()};
