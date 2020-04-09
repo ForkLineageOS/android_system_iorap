@@ -17,6 +17,7 @@
 #include "binder/package_version_map.h"
 #include "common/debug.h"
 #include "common/expected.h"
+#include "common/printer.h"
 #include "common/rx_async.h"
 #include "common/trace.h"
 #include "db/app_component_name.h"
@@ -34,13 +35,14 @@
 #include <android-base/properties.h>
 #include <rxcpp/rx.hpp>
 #include <server_configurable_flags/get_flags.h>
+#include <utils/misc.h>
+#include <utils/Trace.h>
 
 #include <atomic>
 #include <filesystem>
 #include <functional>
 #include <type_traits>
 #include <unordered_map>
-#include <utils/Trace.h>
 
 using rxcpp::observe_on_one_worker;
 
@@ -58,6 +60,10 @@ using perfetto::PerfettoStreamCommand;
 using perfetto::PerfettoTraceProto;
 
 using db::AppComponentName;
+
+static std::atomic<bool> s_tracing_allowed{false};
+static std::atomic<bool> s_readahead_allowed{false};
+static std::atomic<uint64_t> s_min_traces{3};
 
 struct PackageBlacklister {
   // "x.y.z;foo.bar.baz" colon-separated list of substrings
@@ -189,6 +195,8 @@ struct AppLaunchEventState {
 
     DCHECK_GE(event.sequence_id, 0);
     sequence_id_ = static_cast<size_t>(event.sequence_id);
+    allowed_readahead_ = s_readahead_allowed;
+    allowed_tracing_ = s_tracing_allowed;
 
     switch (event.type) {
       case Type::kIntentStarted: {
@@ -551,7 +559,6 @@ struct AppLaunchEventState {
 
   void AbortTrace() {
     LOG(VERBOSE) << "AppLaunchEventState - AbortTrace";
-    DCHECK(allowed_tracing_);
 
     // if the tracing is not running, do nothing.
     if (!IsTracing()){
@@ -575,7 +582,6 @@ struct AppLaunchEventState {
 
   void MarkPendingTrace() {
     LOG(VERBOSE) << "AppLaunchEventState - MarkPendingTrace";
-    DCHECK(allowed_tracing_);
     DCHECK(is_tracing_);
     DCHECK(rx_lifetime_.has_value());
 
@@ -916,33 +922,13 @@ class EventManager::Impl {
     // Try to create version map
     RetryCreateVersionMap();
 
-    // TODO: read all properties from one config class.
-    // PH properties do not work if they contain ".". "_" was instead used here.
-    const char* ph_namespace = "runtime_native_boot";
-    tracing_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
-        ph_namespace,
-        "iorap_perfetto_enable",
-        ::android::base::GetProperty("iorapd.perfetto.enable", /*default*/"true")) == "true";
-    readahead_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
-        ph_namespace,
-        "iorap_readahead_enable",
-        ::android::base::GetProperty("iorapd.readahead.enable", /*default*/"true")) == "true";
-
-    package_blacklister_ = PackageBlacklister{
-        /* Colon-separated string list of blacklisted packages, e.g.
-         * "foo.bar.baz;com.fake.name" would blacklist {"foo.bar.baz", "com.fake.name"} packages.
-         *
-         * Blacklisted packages are ignored by iorapd.
-         */
-        server_configurable_flags::GetServerConfigurableFlag(
-            ph_namespace,
-            "iorap_blacklisted_packages",
-            ::android::base::GetProperty("iorapd.blacklist_packages",
-                                         /*default*/""))
-    };
+    iorap::common::StderrLogPrinter printer{"iorapd"};
+    RefreshSystemProperties(printer);
 
     rx_lifetime_ = InitializeRxGraph();
     rx_lifetime_jobs_ = InitializeRxGraphForJobScheduledEvents();
+
+    android::add_sysprop_change_callback(&Impl::OnSyspropChanged, /*priority*/-10000);
   }
 
   void RetryCreateVersionMap() {
@@ -1107,6 +1093,7 @@ class EventManager::Impl {
         min_traces,
         std::make_shared<maintenance::Exec>()};
 
+      LOG(DEBUG) << "StartMaintenance: min_traces=" << min_traces;
       maintenance::CompileAppsOnDevice(db, params);
     }
   }
@@ -1133,7 +1120,7 @@ class EventManager::Impl {
                          /*inode_textcache=*/std::nullopt,
                          /*verbose=*/false,
                          /*recompile=*/false,
-                         /*min_traces=*/3);
+                         s_min_traces);
 
         // TODO: probably this shouldn't be emitted until most of the usual DCHECKs
         // (for example, validate a job isn't already started, the request is not reused, etc).
@@ -1196,6 +1183,80 @@ class EventManager::Impl {
       } else {
         LOG(WARNING) << "EventManager: TaskResultCallbacks may have been released early";
       }
+  }
+
+  static void OnSyspropChanged() {
+    LOG(DEBUG) << "OnSyspropChanged";
+  }
+
+  void RefreshSystemProperties(::android::Printer& printer) {
+    // TODO: read all properties from one config class.
+    // PH properties do not work if they contain ".". "_" was instead used here.
+    const char* ph_namespace = "runtime_native_boot";
+    tracing_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
+        ph_namespace,
+        "iorap_perfetto_enable",
+        ::android::base::GetProperty("iorapd.perfetto.enable", /*default*/"true")) == "true";
+    s_tracing_allowed = tracing_allowed_;
+    printer.printFormatLine("iorapd.perfetto.enable = %s", tracing_allowed_ ? "true" : "false");
+
+    readahead_allowed_ = server_configurable_flags::GetServerConfigurableFlag(
+        ph_namespace,
+        "iorap_readahead_enable",
+        ::android::base::GetProperty("iorapd.readahead.enable", /*default*/"true")) == "true";
+    s_readahead_allowed = readahead_allowed_;
+    printer.printFormatLine("iorapd.readahead.enable = %s", s_readahead_allowed ? "true" : "false");
+
+    s_min_traces =
+        ::android::base::GetUintProperty<uint64_t>("iorapd.maintenance.min_traces", /*default*/3);
+    uint64_t min_traces = s_min_traces;
+    printer.printFormatLine("iorapd.maintenance.min_traces = %" PRIu64, min_traces);
+
+    package_blacklister_ = PackageBlacklister{
+        /* Colon-separated string list of blacklisted packages, e.g.
+         * "foo.bar.baz;com.fake.name" would blacklist {"foo.bar.baz", "com.fake.name"} packages.
+         *
+         * Blacklisted packages are ignored by iorapd.
+         */
+        server_configurable_flags::GetServerConfigurableFlag(
+            ph_namespace,
+            "iorap_blacklisted_packages",
+            ::android::base::GetProperty("iorapd.blacklist_packages",
+                                         /*default*/""))
+    };
+
+    LOG(DEBUG) << "RefreshSystemProperties";
+  }
+
+  bool PurgePackage(::android::Printer& printer, const std::string& package_name) {
+    (void)printer;
+
+    db::DbHandle db{db::SchemaModel::GetSingleton()};
+    db::CleanUpFilesForPackage(db, package_name);
+    LOG(DEBUG) << "PurgePackage: " << package_name;
+
+    return true;
+  }
+
+  bool CompilePackage(::android::Printer& printer, const std::string& package_name) {
+    (void)printer;
+
+    ScopedFormatTrace atrace_compile_app(ATRACE_TAG_PACKAGE_MANAGER,
+                                         "Compile one app on device");
+
+    maintenance::ControllerParameters params{
+      /*output_text*/false,
+      /*inode_textcache*/std::nullopt,
+      WOULD_LOG(VERBOSE),
+      /*recompile*/false,
+      s_min_traces,
+      std::make_shared<maintenance::Exec>()};
+
+    db::DbHandle db{db::SchemaModel::GetSingleton()};
+    bool res = maintenance::CompileSingleAppOnDevice(db, std::move(params), package_name);
+    LOG(DEBUG) << "CompilePackage: " << package_name;
+
+    return res;
   }
 
   bool readahead_allowed_{true};
@@ -1284,6 +1345,18 @@ bool EventManager::OnPackageChanged(const android::content::pm::PackageChangeEve
 
 void EventManager::Dump(/*borrow*/::android::Printer& printer) {
   return impl_->Dump(printer);
+}
+
+void EventManager::RefreshSystemProperties(::android::Printer& printer) {
+  return impl_->RefreshSystemProperties(printer);
+}
+
+bool EventManager::PurgePackage(::android::Printer& printer, const std::string& package_name) {
+  return impl_->PurgePackage(printer, package_name);
+}
+
+bool EventManager::CompilePackage(::android::Printer& printer, const std::string& package_name) {
+  return impl_->CompilePackage(printer, package_name);
 }
 
 }  // namespace iorap::manager
