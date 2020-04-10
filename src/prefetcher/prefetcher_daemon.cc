@@ -1062,7 +1062,7 @@ std::optional<PrefetcherForkParameters> StartSocketViaFork() {
   bool Main(PrefetcherForkParameters params) {
     LOG(VERBOSE) << "PrefetcherDaemon::Main " << params;
 
-    CommandParser command_parser{std::move(params)};
+    CommandParser command_parser{params};
 
     Command next_command{};
 
