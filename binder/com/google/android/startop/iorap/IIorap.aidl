@@ -20,6 +20,7 @@ import com.google.android.startop.iorap.ITaskListener;
 
 import com.google.android.startop.iorap.AppIntentEvent;
 import com.google.android.startop.iorap.AppLaunchEvent;
+import com.google.android.startop.iorap.DexOptEvent;
 import com.google.android.startop.iorap.JobScheduledEvent;
 import com.google.android.startop.iorap.PackageEvent;
 import com.google.android.startop.iorap.RequestId;
@@ -110,6 +111,7 @@ oneway interface IIorap {
 
     // void onActivityHintEvent(in RequestId request, in ActivityHintEvent event);
     void onAppLaunchEvent(in RequestId request, in AppLaunchEvent event);
+    void onDexOptEvent(in RequestId request, in DexOptEvent event);
     void onJobScheduledEvent(in RequestId request, in JobScheduledEvent event);
     void onPackageEvent(in RequestId request, in PackageEvent event);
     void onAppIntentEvent(in RequestId request, in AppIntentEvent event);

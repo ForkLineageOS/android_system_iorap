@@ -18,6 +18,7 @@
 #define IORAP_MANAGER_EVENT_MANAGER_H_
 
 #include "binder/app_launch_event.h"
+#include "binder/dexopt_event.h"
 #include "binder/job_scheduled_event.h"
 #include "binder/request_id.h"
 #include "binder/task_result.h"
@@ -72,6 +73,13 @@ class EventManager {
   // * Other types are handled in a separate thread.
   bool OnAppLaunchEvent(binder::RequestId request_id,
                         const binder::AppLaunchEvent& event);
+
+  // Handles a DexOptEvent:
+  //
+  // Clean up the invalidate traces after package is updated by dexopt.
+  bool OnDexOptEvent(binder::RequestId request_id,
+                     const binder::DexOptEvent& event);
+
 
   // Handles a JobScheduledEvent:
   //

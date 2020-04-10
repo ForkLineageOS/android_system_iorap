@@ -177,6 +177,14 @@ class IIorapImpl::Impl {
     return service_params_.event_manager_->OnAppLaunchEvent(request_id, event);
   }
 
+  bool OnDexOptEvent(const RequestId& request_id, const DexOptEvent& event) {
+    if (MaybeHandleFakeBehavior(request_id)) {
+      return true;
+    }
+
+    return service_params_.event_manager_->OnDexOptEvent(request_id, event);
+  }
+
   bool  OnJobScheduledEvent(const RequestId& request_id,
                             const JobScheduledEvent& event) {
     if (MaybeHandleFakeBehavior(request_id)) {
@@ -415,6 +423,23 @@ Status SendArgs(const char* function_name,
     //
     // Most of the work here is done async, so it should handle
     // async callbacks.
+    return Status::fromStatusT(::android::BAD_VALUE);
+  }
+}
+
+template <typename ... Args>
+Status SendArgs(const char* function_name,
+                Impl* self,
+                const RequestId& request_id,
+                const DexOptEvent& event) {
+  DCHECK_EQ(std::string(function_name), "onDexOptEvent");
+  LOG(VERBOSE) << "IIorap::onDexOptEvent";
+
+  MAYBE_HAVE_FAKE_BEHAVIOR(self, request_id);
+
+  if (self->OnDexOptEvent(request_id, event)) {
+    return Status::ok();
+  } else {
     return Status::fromStatusT(::android::BAD_VALUE);
   }
 }
