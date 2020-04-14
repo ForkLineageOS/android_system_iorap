@@ -49,6 +49,7 @@ using rxcpp::observe_on_one_worker;
 namespace iorap::manager {
 
 using binder::AppLaunchEvent;
+using binder::DexOptEvent;
 using binder::JobScheduledEvent;
 using binder::RequestId;
 using binder::TaskResult;
@@ -981,6 +982,16 @@ class EventManager::Impl {
     return false;
   }
 
+  bool OnDexOptEvent(RequestId request_id,
+                     const DexOptEvent& event) {
+    LOG(VERBOSE) << "EventManager::OnDexOptEvent("
+                 << "request_id=" << request_id.request_id << ","
+                 << event.package_name
+                 << ")";
+
+    return PurgePackage(event.package_name);
+  }
+
   bool OnJobScheduledEvent(RequestId request_id,
                            const JobScheduledEvent& event) {
     LOG(VERBOSE) << "EventManager::OnJobScheduledEvent("
@@ -1230,11 +1241,13 @@ class EventManager::Impl {
 
   bool PurgePackage(::android::Printer& printer, const std::string& package_name) {
     (void)printer;
+    return PurgePackage(package_name);
+  }
 
+  bool PurgePackage(const std::string& package_name) {
     db::DbHandle db{db::SchemaModel::GetSingleton()};
     db::CleanUpFilesForPackage(db, package_name);
     LOG(DEBUG) << "PurgePackage: " << package_name;
-
     return true;
   }
 
@@ -1332,6 +1345,11 @@ void EventManager::Join() {
 bool EventManager::OnAppLaunchEvent(RequestId request_id,
                                     const AppLaunchEvent& event) {
   return impl_->OnAppLaunchEvent(request_id, event);
+}
+
+bool EventManager::OnDexOptEvent(RequestId request_id,
+                                 const DexOptEvent& event) {
+  return impl_->OnDexOptEvent(request_id, event);
 }
 
 bool EventManager::OnJobScheduledEvent(RequestId request_id,
