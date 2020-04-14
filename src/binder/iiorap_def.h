@@ -42,6 +42,8 @@ FN(onSystemServiceEvent,                                                        
 FN(onSystemServiceUserEvent,                                                                       \
                     (const ::com::google::android::startop::iorap::,RequestId,&,request),          \
                     (const ::com::google::android::startop::iorap::,SystemServiceUserEvent,&,event))\
+FN(onDexOptEvent,   (const ::com::google::android::startop::iorap::,RequestId,&,request),          \
+                    (const ::com::google::android::startop::iorap::,DexOptEvent,&,event))          \
 FN_END()                                                                                           \
 
 // Convenience macros to unpack the 2nd parameter from IIORAP_IFACE_DEF#FN calls.
