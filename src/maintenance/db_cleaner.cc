@@ -43,12 +43,17 @@ void CleanUpDatabase(const db::DbHandle& db,
   }
 
   for (db::PackageModel package : packages) {
+    std::optional<int64_t> version = version_map->Find(package.name);
+    if (!version) {
+      LOG(DEBUG) << "Fail to find version for package " << package.name
+                 << " with version " << package.version
+                 << ". The package manager may be down.";
+      continue;
+    }
     // Package is cleanup if it
-    // * has a null version, because each package should have version now
     // * is not in the version map, it may be uninstalled
     // * has an different version with the latest one
-    std::optional<int64_t> version = version_map->Find(package.name);
-    if (!version || *version != package.version) {
+    if (*version != package.version) {
       db::CleanUpFilesForPackage(db, package.id, package.name, package.version);
       if (!package.Delete()) {
         LOG(ERROR) << "Fail to delete package " << package.name
