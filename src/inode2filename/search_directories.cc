@@ -183,7 +183,7 @@ struct InodeSet {
     });
 
     if (found != inode_list.end()) {
-      const Inode& inode = found->second;
+      Inode inode = found->second;
       LOG(VERBOSE) << "InodeSet:FindAndRemoveInodeInList *success* inode+device " << inode;
       DCHECK(found->second.inode == stat_buf.st_ino);
       // Erase the inode from the list. This is important.
