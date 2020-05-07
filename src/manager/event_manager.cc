@@ -235,17 +235,18 @@ struct AppLaunchEventState {
           break;
         }
 
+        // The time should be set before perfetto tracing.
+        if (event.timestamp_nanos >= 0) {
+          intent_started_ns_ = event.timestamp_nanos;
+        } else {
+          LOG(WARNING) << "Negative event timestamp: " << event.timestamp_nanos;
+        }
+
         if (allowed_readahead_) {
           StartReadAhead(sequence_id_, component_name);
         }
         if (allowed_tracing_ && !IsReadAhead()) {
           rx_lifetime_ = StartTracing(std::move(component_name));
-        }
-
-        if (event.timestamp_nanos >= 0) {
-          intent_started_ns_ = event.timestamp_nanos;
-        } else {
-          LOG(WARNING) << "Negative event timestamp: " << event.timestamp_nanos;
         }
 
         break;
