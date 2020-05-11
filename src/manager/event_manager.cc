@@ -228,18 +228,23 @@ struct AppLaunchEventState {
         history_id_observable.connect();
 
         DCHECK(!IsTracing());
+
+        // The time should be set before perfetto tracing.
+        // Record the timestamp even no perfetto tracing is triggered,
+        // because the tracing may start in the following ActivityLaunched
+        // event. Otherwise, there will be no starting timestamp and
+        // trace without starting timestamp is not considered for compilation.
+        if (event.timestamp_nanos >= 0) {
+          intent_started_ns_ = event.timestamp_nanos;
+        } else {
+          LOG(WARNING) << "Negative event timestamp: " << event.timestamp_nanos;
+        }
+
         // Optimistically start tracing if we have the activity in the intent.
         if (!event.intent_proto->has_component()) {
           // Can't do anything if there is no component in the proto.
           LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent: no component, can't trace";
           break;
-        }
-
-        // The time should be set before perfetto tracing.
-        if (event.timestamp_nanos >= 0) {
-          intent_started_ns_ = event.timestamp_nanos;
-        } else {
-          LOG(WARNING) << "Negative event timestamp: " << event.timestamp_nanos;
         }
 
         if (allowed_readahead_) {
