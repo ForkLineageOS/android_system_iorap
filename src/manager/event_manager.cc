@@ -302,7 +302,7 @@ struct AppLaunchEventState {
 
           AbortTrace();
           AbortReadAhead();
-        } else if (!IsTracing() || !IsReadAhead()) {  // and the temperature is Cold.
+        } else if (!IsTracing() && !IsReadAhead()) {  // and the temperature is Cold.
           // Start late trace when intent didn't have a component name
           LOG(VERBOSE) << "AppLaunchEventState#OnNewEvent need to start new trace";
 
