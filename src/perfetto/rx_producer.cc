@@ -83,7 +83,7 @@ PerfettoDependencies::Component PerfettoDependencies::CreateComponent() {
     .bind<PerfettoConsumer, PerfettoConsumerImpl>()
     .registerProvider([]() /* -> TraceConfig */ {
         return CreateConfig(kTraceDurationMs,
-                            /*deferred_start*/true,
+                            /*deferred_start*/false,
                             kBufferSize);
     });
 }
