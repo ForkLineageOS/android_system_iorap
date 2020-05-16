@@ -23,32 +23,41 @@ std::shared_ptr<PackageVersionMap> PackageVersionMap::Create() {
   std::shared_ptr<PackageManagerRemote> package_manager =
       PackageManagerRemote::Create();
   if (!package_manager) {
-    return nullptr;
+    return std::make_shared<PackageVersionMap>();
   }
 
-  VersionMap map = package_manager->GetPackageVersionMap();
-
+  std::optional<VersionMap> map = package_manager->GetPackageVersionMap();
   return std::make_shared<PackageVersionMap>(package_manager, map);
 }
 
-void PackageVersionMap::UpdateAll() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  size_t old_size = version_map_.size();
-  version_map_ = package_manager_->GetPackageVersionMap();
+void PackageVersionMap::UpdateAll() {std::lock_guard<std::mutex> lock(mutex_);
+  size_t old_size = version_map_->size();
+  std::optional<VersionMap> new_version_map =
+      package_manager_->GetPackageVersionMap();
+  if (!new_version_map) {
+    LOG(DEBUG) << "Failed to get the latest version map";
+    return;
+  }
+  version_map_ = std::move(new_version_map);
   LOG(DEBUG) << "Update for version is done. The size is from " << old_size
-             << " to " << version_map_.size();
+             << " to " << version_map_->size();
 }
 
 bool PackageVersionMap::Update(std::string package_name, int64_t version) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!version_map_) {
+    LOG(DEBUG) << "The version map doesn't exist. "
+               << "The package manager may be down.";
+    return false;
+  }
 
-  VersionMap::iterator it = version_map_.find(package_name);
-  if (it == version_map_.end()) {
+  VersionMap::iterator it = version_map_->find(package_name);
+  if (it == version_map_->end()) {
     LOG(DEBUG) << "New installed package "
                << package_name
                << " with version "
                << version;
-    version_map_[package_name] = version;
+    (*version_map_)[package_name] = version;
     return true;
   }
 
@@ -57,7 +66,7 @@ bool PackageVersionMap::Update(std::string package_name, int64_t version) {
                << package_name
                << " with version "
                << version;
-    version_map_[package_name] = version;
+    (*version_map_)[package_name] = version;
     return true;
   }
 
@@ -68,20 +77,33 @@ bool PackageVersionMap::Update(std::string package_name, int64_t version) {
   return false;
 }
 
-size_t PackageVersionMap::Size() { return version_map_.size(); }
+size_t PackageVersionMap::Size() {
+  if (!version_map_) {
+    LOG(DEBUG) << "The version map doesn't exist. "
+               << "The package manager may be down.";
+    return -1;
+  }
+  return version_map_->size();
+}
 
-int64_t PackageVersionMap::GetOrQueryPackageVersion(const std::string& package_name) {
+std::optional<int64_t> PackageVersionMap::GetOrQueryPackageVersion(
+    const std::string& package_name) {
   std::lock_guard<std::mutex> lock(mutex_);
-  VersionMap::iterator it = version_map_.find(package_name);
+  if (!version_map_) {
+    LOG(DEBUG) << "The version map doesn't exist. "
+               << "The package manager may be down.";
+    return std::nullopt;
+  }
 
-  if (it == version_map_.end()) {
+  VersionMap::iterator it = version_map_->find(package_name);
+  if (it == version_map_->end()) {
     LOG(WARNING) << "Cannot find version for: " << package_name
                  << " in the hash table";
     std::optional<int64_t> version =
         package_manager_->GetPackageVersion(package_name);
     if (version) {
       LOG(VERBOSE) << "Find version for: " << package_name << " on the fly.";
-      version_map_[package_name] = *version;
+      (*version_map_)[package_name] = *version;
       return *version;
     } else {
       LOG(ERROR) << "Cannot find version for: " << package_name
