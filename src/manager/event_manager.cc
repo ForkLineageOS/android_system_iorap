@@ -388,10 +388,15 @@ struct AppLaunchEventState {
     // Firstly, try to find the compiled trace from sqlite.
     android::base::Timer timer{};
     db::DbHandle db{db::SchemaModel::GetSingleton()};
-    int version = version_map_->GetOrQueryPackageVersion(component_name.package);
+    std::optional<int> version =
+        version_map_->GetOrQueryPackageVersion(component_name.package);
+    if (!version) {
+      LOG(DEBUG) << "The version is NULL, maybe package manager is down.";
+      return std::nullopt;
+    }
     db::VersionedComponentName vcn{component_name.package,
                                    component_name.activity_name,
-                                   version};
+                                   *version};
 
     std::optional<db::PrefetchFileModel> compiled_trace =
           db::PrefetchFileModel::SelectByVersionedComponentName(db, vcn);
@@ -465,7 +470,8 @@ struct AppLaunchEventState {
     return is_tracing_;
   }
 
-  rxcpp::composite_subscription StartTracing(AppComponentName component_name) {
+  std::optional<rxcpp::composite_subscription> StartTracing(
+      AppComponentName component_name) {
     DCHECK(allowed_tracing_);
     DCHECK(!IsTracing());
 
@@ -503,10 +509,15 @@ struct AppLaunchEventState {
              LOG(VERBOSE) << "StartTracing -- PerfettoTraceProto received (2)";
            });
 
-    int version = version_map_->GetOrQueryPackageVersion(component_name_->package);
+    std::optional<int> version =
+        version_map_->GetOrQueryPackageVersion(component_name_->package);
+    if (!version) {
+      LOG(DEBUG) << "The version is NULL, maybe package manager is down.";
+      return std::nullopt;
+    }
     db::VersionedComponentName versioned_component_name{component_name.package,
                                                         component_name.activity_name,
-                                                        version};
+                                                        *version};
     lifetime = RxAsync::SubscribeAsync(*async_pool_,
         std::move(stream_via_threads),
         /*on_next*/[versioned_component_name]
@@ -647,11 +658,16 @@ struct AppLaunchEventState {
 
     using namespace iorap::db;
 
-    int version = version_map_->GetOrQueryPackageVersion(component_name_->package);
+    std::optional<int> version =
+        version_map_->GetOrQueryPackageVersion(component_name_->package);
+    if (!version) {
+      LOG(DEBUG) << "The version is NULL, maybe package manager is down.";
+      return std::nullopt;
+    }
     std::optional<ActivityModel> activity =
         ActivityModel::SelectOrInsert(db,
                                       component_name_->package,
-                                      version,
+                                      *version,
                                       component_name_->activity_name);
 
     if (!activity) {
