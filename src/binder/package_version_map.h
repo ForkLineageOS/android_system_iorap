@@ -30,9 +30,12 @@ class PackageVersionMap {
   static std::shared_ptr<PackageVersionMap> Create();
 
   PackageVersionMap(std::shared_ptr<PackageManagerRemote> package_manager,
-                    const VersionMap& version_map)
+                    std::optional<VersionMap> version_map)
       : package_manager_(package_manager),
         version_map_(version_map) {}
+
+  PackageVersionMap()
+      : package_manager_(nullptr), version_map_(std::nullopt) {}
 
   // Updates the version specified by 'package_name' to 'version'.
   //
@@ -50,8 +53,8 @@ class PackageVersionMap {
   // Empty means the app is not inside the RAM version map, maybe due to
   // the app is newly installed.
   std::optional<int64_t> Find(const std::string& package_name) {
-    VersionMap::iterator it = version_map_.find(package_name);
-    if (it == version_map_.end()) {
+    VersionMap::iterator it = version_map_->find(package_name);
+    if (it == version_map_->end()) {
       return std::nullopt;
     }
     return it->second;
@@ -67,11 +70,12 @@ class PackageVersionMap {
   //
   // If no version can be found for some reason, return -1,
   // because when an app has no version the package manager returns -1.
-  int64_t GetOrQueryPackageVersion(const std::string& package_name);
+  std::optional<int64_t> GetOrQueryPackageVersion(
+      const std::string& package_name);
 
  private:
   std::shared_ptr<PackageManagerRemote> package_manager_;
-  VersionMap version_map_;
+  std::optional<VersionMap> version_map_;
   std::mutex mutex_;
 };
 }  // namespace iorap::binder

@@ -53,7 +53,7 @@ class PackageManagerRemote {
   std::optional<int64_t> GetPackageVersion(const std::string& package_name);
 
   // Gets a map of package name and its version.
-  VersionMap GetPackageVersionMap();
+  std::optional<VersionMap> GetPackageVersionMap();
 
   void RegisterPackageChangeObserver(android::sp<PackageChangeObserver> observer);
 
@@ -74,7 +74,7 @@ class PackageManagerRemote {
   static android::sp<IPackageManager> GetPackageService();
 
   // Gets all package names.
-  std::vector<std::string> GetAllPackages();
+  std::optional<std::vector<std::string>> GetAllPackages();
 
   android::sp<IPackageManager> package_service_;
 };

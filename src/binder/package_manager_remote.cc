@@ -64,18 +64,23 @@ std::optional<int64_t> PackageManagerRemote::GetPackageVersion(
   }
 }
 
-VersionMap PackageManagerRemote::GetPackageVersionMap() {
+std::optional<VersionMap> PackageManagerRemote::GetPackageVersionMap() {
   VersionMap package_version_map;
-  std::vector<std::string> packages = GetAllPackages();
+  std::optional<std::vector<std::string>> packages = GetAllPackages();
+  if (!packages) {
+    LOG(DEBUG) << "Failed to get all packages. The package manager may be down.";
+    return std::nullopt;
+  }
   LOG(DEBUG) << "PackageManagerRemote::GetPackageVersionMap: "
-             << packages.size()
+             << packages->size()
              << " packages are found.";
 
-  for (std::string package : packages) {
+  for (const std::string& package : *packages) {
     std::optional<int64_t> version = GetPackageVersion(package);
     if (!version) {
-      LOG(DEBUG) << "Cannot get version for " << package;
-      continue;
+      LOG(DEBUG) << "Cannot get version for " << package
+                 << "Package manager may be down";
+      return std::nullopt;
     }
     package_version_map[package] = *version;
   }
@@ -83,7 +88,7 @@ VersionMap PackageManagerRemote::GetPackageVersionMap() {
   return package_version_map;
 }
 
-std::vector<std::string> PackageManagerRemote::GetAllPackages() {
+std::optional<std::vector<std::string>> PackageManagerRemote::GetAllPackages() {
   std::vector<std::string> packages;
   android::binder::Status status = InvokeRemote(
       [this, &packages]() {
@@ -94,9 +99,8 @@ std::vector<std::string> PackageManagerRemote::GetAllPackages() {
     return packages;
   }
 
-  LOG(FATAL) << "Failed to get all packages: "
-             << status.toString8().c_str();
-  return packages;
+  LOG(ERROR) << "Failed to get all packages: " << status.toString8().c_str();
+  return std::nullopt;
 
 }
 
