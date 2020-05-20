@@ -591,9 +591,10 @@ void SessionDirect::Dump(std::ostream& os, bool multiline) const {
 }
 
 SessionDirect::~SessionDirect() {
-  for (auto it = entry_list_map_.begin(); it != entry_list_map_.end(); ++it) {
+  for (auto it = entry_list_map_.begin(); it != entry_list_map_.end();) {
     size_t path_id = it->first;
 
+    ++it; // the iterator is removed in the following Unregister method.
     UnregisterFilePath(path_id);
   }
 }
