@@ -176,9 +176,16 @@ bool StartViaFork(const CompilerForkParameters& params) {
       LOG(ERROR) << "Child terminated abnormally, status: " << WEXITSTATUS(wstatus);
       return false;
     }
-    LOG(DEBUG) << "Child terminated, status: " << WEXITSTATUS(wstatus);
 
-    return true;
+    int status = WEXITSTATUS(wstatus);
+    LOG(DEBUG) << "Child terminated, status: " << status;
+    if (status == 0) {
+      LOG(DEBUG) << "Iorap compilation succeeded";
+      return true;
+    } else {
+      LOG(ERROR) << "Iorap compilation failed";
+      return false;
+    }
   } else {
     // we are the child that was forked.
     std::vector<std::string> argv_vec = MakeCompilerParams(params);
@@ -338,10 +345,9 @@ bool CompileActivity(const db::DbHandle& db,
                                           activity_name.c_str());
     if (!StartViaFork(compiler_params)) {
       LOG(ERROR) << "Compilation failed for package_id:" << package_id
-                 <<" activity_name: " <<activity_name;
+                 << " activity_name: " << activity_name;
       return false;
     }
-
   }
 
   std::optional<db::PrefetchFileModel> compiled_trace =
