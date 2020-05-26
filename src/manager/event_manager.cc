@@ -615,6 +615,7 @@ struct AppLaunchEventState {
       LOG(VERBOSE) << "AppLaunchEventState - MarkPendingTrace - lifetime was empty";
     }
 
+    is_tracing_ = false;
     // FIXME: how do we clear this vector?
   }
 
