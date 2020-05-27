@@ -1242,7 +1242,7 @@ class EventManager::Impl {
     printer.printFormatLine("iorapd.readahead.enable = %s", s_readahead_allowed ? "true" : "false");
 
     s_min_traces =
-        ::android::base::GetUintProperty<uint64_t>("iorapd.maintenance.min_traces", /*default*/3);
+        ::android::base::GetUintProperty<uint64_t>("iorapd.maintenance.min_traces", /*default*/1);
     uint64_t min_traces = s_min_traces;
     printer.printFormatLine("iorapd.maintenance.min_traces = %" PRIu64, min_traces);
 
