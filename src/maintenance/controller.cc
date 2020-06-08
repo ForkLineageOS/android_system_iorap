@@ -43,7 +43,7 @@
 namespace iorap::maintenance {
 
 const constexpr int64_t kCompilerCheckIntervalMs = 10;
-static constexpr size_t kMinTracesForCompilation = 3;
+static constexpr size_t kMinTracesForCompilation = 1;
 
 struct LastJobInfo {
   time_t last_run_ns_{0};
