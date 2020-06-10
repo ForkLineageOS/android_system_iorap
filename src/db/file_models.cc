@@ -61,7 +61,14 @@ static bool MkdirWithParents(const std::string& path) {
 #if defined(_WIN32)
       int ret = mkdir(dir_path.c_str());
 #else
+      mode_t old_mask = umask(0);
+      // The user permission is 5 to allow system server to
+      // read the files. No other users could do that because
+      // the upper directory only allows system server and iorapd
+      // to access. Also selinux rules prevent other users to
+      // read files here.
       int ret = mkdir(dir_path.c_str(), 0755);
+      umask(old_mask);
 #endif
       if (ret != 0) {
         PLOG(ERROR) << "failed to create dir " << dir_path;
