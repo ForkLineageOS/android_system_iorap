@@ -128,7 +128,7 @@ std::vector<std::string> MakeCompilerParams(const CompilerForkParameters& params
 
 // Sets a watch dog for the given pid and kill it if timeout.
 std::thread SetTimeoutWatchDog(pid_t pid, int64_t timeout_ms, std::atomic<bool>& cancel_watchdog) {
-  std::thread watchdog_thread{[&]() {
+  std::thread watchdog_thread{[pid, timeout_ms, &cancel_watchdog]() {
     std::chrono::time_point start = std::chrono::system_clock::now();
     std::chrono::milliseconds timeout(timeout_ms);
     while (!cancel_watchdog) {
@@ -140,6 +140,12 @@ std::thread SetTimeoutWatchDog(pid_t pid, int64_t timeout_ms, std::atomic<bool>&
       std::chrono::time_point cur = std::chrono::system_clock::now();
       if (cur - start > timeout) {
         LOG(INFO) << "Process (" << pid << ") is timeout!";
+        LOG(INFO) << "start time: "
+                   << std::chrono::system_clock::to_time_t(start)
+                   << " end time: "
+                   << std::chrono::system_clock::to_time_t(cur)
+                   << " timeout: "
+                   << timeout_ms;
         kill(pid, SIGKILL);
         break;
       }
