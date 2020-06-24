@@ -234,7 +234,7 @@ std::vector<compiler::CompilationInput> GetPerfettoTraceInfo(
     } else if (history.total_time_ns) {
       timestamp_limit = *history.total_time_ns;
     } else {
-      LOG(ERROR) << " No timestamp exists. Using the max value.";
+      LOG(DEBUG) << " No timestamp exists. Using the max value.";
     }
     perfetto_traces.push_back({raw_trace->file_path, timestamp_limit});
   }
