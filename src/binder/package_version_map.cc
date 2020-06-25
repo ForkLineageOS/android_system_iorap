@@ -97,7 +97,7 @@ std::optional<int64_t> PackageVersionMap::GetOrQueryPackageVersion(
 
   VersionMap::iterator it = version_map_->find(package_name);
   if (it == version_map_->end()) {
-    LOG(WARNING) << "Cannot find version for: " << package_name
+    LOG(DEBUG) << "Cannot find version for: " << package_name
                  << " in the hash table";
     std::optional<int64_t> version =
         package_manager_->GetPackageVersion(package_name);
