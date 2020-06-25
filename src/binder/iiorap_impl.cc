@@ -130,7 +130,7 @@ class IIorapImpl::Impl {
     if (listener == nullptr) {
       // No listener. Cannot send anything back to the client.
       // This could be normal, e.g. client had set listener to null before disconnecting.
-      LOG(WARNING) << "Drop result, no listener registered.";
+      LOG(DEBUG) << "Drop result, no listener registered.";
       // TODO: print the result with ostream operator<<
       return;
     }
@@ -153,7 +153,7 @@ class IIorapImpl::Impl {
     if (listener == nullptr) {
       // No listener. Cannot send anything back to the client.
       // This could be normal, e.g. client had set listener to null before disconnecting.
-      LOG(WARNING) << "Drop result, no listener registered.";
+      LOG(DEBUG) << "Drop result, no listener registered.";
       // TODO: print the result with ostream operator<<
       return;
     }
