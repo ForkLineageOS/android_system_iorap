@@ -410,7 +410,7 @@ struct AppLaunchEventState {
       if (std::filesystem::exists(compiled_trace->file_path)) {
         return compiled_trace->file_path;
       } else {
-        LOG(ERROR) << "Compiled trace in sqlite doesn't exists. file_path: "
+        LOG(DEBUG) << "Compiled trace in sqlite doesn't exists. file_path: "
                    << compiled_trace->file_path;
       }
     }

@@ -33,9 +33,6 @@ int main(int /*argc*/, char** argv) {
   if (android::base::GetBoolProperty("iorapd.log.verbose", iorap::kIsDebugBuild)) {
     // Show verbose logs if the property is enabled or if we are a debug build.
     setenv("ANDROID_LOG_TAGS", "*:v", /*overwrite*/ 1);
-  } else {
-    // Debug log-level.
-    setenv("ANDROID_LOG_TAGS", "*:d", /*overwrite*/ 1);
   }
 
   // Logs go to system logcat.
